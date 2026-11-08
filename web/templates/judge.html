@@ -1,76 +1,117 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon %}
 {% block title %}Ledger · Keyhold{% endblock %}
+{% block body_attrs %}data-page="judge"{% endblock %}
 {% block main %}
-<div class="page-head">
-  <h1>Ledger</h1>
-  <p class="lede">Every rescue in this deployment, newest first. States and amounts come from the ledger, which the
-    reconciler keeps in step with PayPal; open a rescue to read PayPal live.</p>
-</div>
-
-<section class="tiles" aria-label="Totals">
-  <div class="tile"><span class="tile-label">Rescues</span><span class="tile-value">{{ view.count }}</span></div>
-  <div class="tile"><span class="tile-label">Held now</span><span class="tile-value">${{ view.totals.held }}</span></div>
-  <div class="tile"><span class="tile-label">Captured</span><span class="tile-value">${{ view.totals.captured }}</span></div>
-  <div class="tile"><span class="tile-label">Refunded</span><span class="tile-value">${{ view.totals.refunded }}</span></div>
-  <div class="tile"><span class="tile-label">Invariant problems</span><span class="tile-value">{{ view.problems }}</span></div>
-  <div class="tile"><span class="tile-label">Money calls in flight</span><span class="tile-value">{{ view.pending_ops | length }}</span></div>
+<section class="ledger-head" aria-labelledby="ledger-h">
+  <p class="eyebrow">Ledger</p>
+  <h1 class="status" id="ledger-h">Every run, and where its money went.</h1>
+  {% if view.summary %}<p class="ledger-sum" id="ledger-sum">{{ view.summary }}.{% if view.no_hold %} <a href="#no-hold">The no-hold runs</a> are below the totals.{% endif %}</p>{% endif %}
+  <p class="lede">Newest first. States and amounts come from the ledger, which the reconciler keeps in step with
+    PayPal. Open a run to read PayPal live.</p>
 </section>
 
-<section class="cols">
-  <div class="card">
-    <h2 class="card-title">Webhooks received</h2>
-    <p>{{ view.webhooks.total }} stored raw before any check.
-      {% for k, v in view.webhooks.outcomes | dictsort %}<span class="pill pill-neutral">{{ k }} {{ v }}</span> {% endfor %}</p>
-    <p class="muted small">applied: verified with PayPal and applied once · duplicate: same event id again, ignored · unverified: signature check failed, never applied.</p>
-  </div>
-  <div class="card">
-    <h2 class="card-title">Reconciler</h2>
-    {% if reconcile %}
-    <p>Last pass {{ reconcile.at | utc }} ({{ 'startup' if reconcile.startup else 'periodic' }}): {{ reconcile.replayed }} replayed,
-      {{ reconcile.repaired }} repaired, {{ reconcile.voided }} voided, {{ reconcile.conflicts }} conflicts, {{ reconcile.errors }} errors.</p>
-    {% else %}
-    <p class="muted">No pass yet in this process. It runs at start-up and every five minutes.</p>
-    {% endif %}
-    <p class="muted small">{{ policy }}</p>
-  </div>
-</section>
-
-<section class="card" aria-labelledby="table-title">
-  <h2 id="table-title" class="card-title">All rescues</h2>
+<section class="card section-gap" aria-labelledby="table-title">
+  <div class="card-head"><h2 class="h3" id="table-title">Runs with a hold</h2><p class="fine"><a href="/judge.json">This ledger as JSON</a></p></div>
   {% if view.rows %}
-  <div class="table-wrap">
-    <table class="ledger">
-      <caption class="sr-only">Rescues, newest first</caption>
-      <thead>
-        <tr>
-          <th scope="col">Rescue</th><th scope="col">Created (UTC)</th><th scope="col">Fault</th><th scope="col">Quote</th>
-          <th scope="col">State</th><th scope="col">Order</th><th scope="col">Authorization</th><th scope="col">Capture</th>
-          <th scope="col">Refund</th><th scope="col">Webhooks</th><th scope="col">Ending</th><th scope="col">Checks</th>
-        </tr>
+  <div class="ledger-wrap">
+    {# Explicit table roles: up to 1023 px the rows are cards (display:block). #}
+    <table class="ledger" role="table">
+      <caption class="sr-only">Runs with a hold, newest first</caption>
+      <thead role="rowgroup">
+        <tr role="row"><th scope="col" role="columnheader">Run</th><th scope="col" role="columnheader">When (UTC)</th><th scope="col" role="columnheader">Outcome</th><th scope="col" role="columnheader">Amount</th>
+          <th scope="col" role="columnheader">PayPal ticks</th><th scope="col" role="columnheader">Checks</th><th scope="col" role="columnheader">Ids</th></tr>
       </thead>
-      <tbody>
+      <tbody role="rowgroup">
         {% for row in view.rows %}
-        <tr>
-          <td><a href="/rescues/{{ row.id }}"><code>{{ row.id[:8] }}</code></a></td>
-          <td class="mono small">{{ (row.created_at or '')[:19] | replace('T', ' ') }}</td>
-          <td><code>{{ row.fault_class }}</code><br><span class="muted small">{{ row.tier }}</span></td>
-          <td>${{ row.quote_amount }}</td>
-          <td><span class="pill pill-{{ row.money.tone }}">{{ row.state }}</span></td>
-          <td><code class="small">{{ row.order_id or '—' }}</code></td>
-          <td><code class="small">{{ row.authorization_id or '—' }}</code>{% if row.auth_status %}<br><span class="muted small">{{ row.auth_status }}</span>{% endif %}</td>
-          <td>{% if row.capture_id %}${{ row.captured_amount }}<br><code class="small">{{ row.capture_id }}</code>{% else %}—{% endif %}</td>
-          <td>{% if row.refund_id %}${{ row.refunded_amount }}<br><code class="small">{{ row.refund_id }}</code>{% else %}—{% endif %}</td>
-          <td class="small">{% for k, v in row.ticks.items() %}{% if v %}<span class="tick tick-on">{{ k }}</span> {% endif %}{% endfor %}</td>
-          <td class="small">{{ row.end_reason or (row.run_stage or '') }}</td>
-          <td>{% if row.problems %}<span class="pill pill-warn" title="{{ row.problems | join('; ') }}">{{ row.problems | length }} problem{{ 's' if row.problems | length > 1 }}</span>{% else %}<span class="pill pill-captured">ok</span>{% endif %}{% if row.attention %} <span class="pill pill-warn" title="{{ row.attention | join('; ') }}">needs a person</span>{% endif %}</td>
+        {% set oc = row.outcome %}
+        {% set pill = {'charged': 'charged', 'capture_pending': 'held', 'refunded': 'refunded', 'refunding': 'refunded', 'pending': ('held' if row.state in ['HELD', 'ACTIVE', 'PROBING'] else 'neutral')}.get(oc.state, 'voided') %}
+        <tr role="row" data-state="{{ row.state }}">
+          <td role="cell" class="c-run run"><a href="/rescues/{{ row.id }}">{{ row.title }}</a><span class="id" title="{{ row.id }}">{{ row.short_id }}</span></td>
+          <td role="cell" class="c-when when">{{ (row.created_at or '')[:16] | replace('T', ' ') }}</td>
+          <td role="cell" class="c-outcome"><span class="pill {{ pill }}" title="{{ row.state }}">{{ oc.label if oc.state != 'pending' else 'Running' }}</span>{% if oc.note %}<span class="reason">{{ oc.note }}</span>{% endif %}</td>
+          <td role="cell" class="c-amt amt">{% if row.refunded_amount and oc.state in ['refunded', 'refunding'] %}${{ row.net_charged }} net<span class="reason">refunded ${{ row.refunded_amount }} · quote ${{ row.quote_amount }}</span>{% else %}{% if row.captured_amount and oc.state != 'declined' %}${{ row.captured_amount }}{% elif row.state in ['HELD', 'ACTIVE', 'PROBING'] %}${{ row.authorized_amount or row.quote_amount }} held{% else %}$0.00{% endif %}<span class="reason">quote ${{ row.quote_amount }}</span>{% endif %}</td>
+          <td role="cell" class="c-ticks"><span class="ticks-line">{% if row.api_ticks.of %}<span aria-hidden="true">API {{ row.api_ticks.done }}/{{ row.api_ticks.of }} · Webhook {{ row.webhook_ticks.done }}/{{ row.webhook_ticks.of }}</span><span class="sr-only">PayPal API answers {{ row.api_ticks.done }} of {{ row.api_ticks.of }}, verified webhooks {{ row.webhook_ticks.done }} of {{ row.webhook_ticks.of }}</span>{% else %}no PayPal call{% endif %}</span></td>
+          <td role="cell" class="c-checks">{% if row.problems %}<span class="pill problem" title="{{ row.problems | join('; ') }}"><span class="card-only">Checks: </span>{{ row.problems | length }} problem{{ 's' if row.problems | length > 1 }}</span>{% else %}<span class="pill ok"><span class="card-only">Checks </span>ok</span>{% endif %}{% if row.attention %} <span class="pill problem" title="{{ row.attention | join('; ') }}">needs a person</span>{% endif %}</td>
+          <td role="cell" class="c-ids"><details><summary>{{ icon('i-chev') }}ids</summary>
+            <dl class="kv">
+              <dt>Rescue</dt><dd><code>{{ row.id }}</code></dd>
+              <dt>Fault class</dt><dd><code>{{ row.fault_class }}</code> {{ row.tier }}</dd>
+              <dt>Order</dt><dd><code>{{ row.order_id or '—' }}</code></dd>
+              <dt>Authorization</dt><dd><code>{{ row.authorization_id or '—' }}</code>{% if row.auth_status %} {{ row.auth_status }}{% endif %}</dd>
+              <dt>Capture</dt><dd><code>{{ row.capture_id or '—' }}</code></dd>
+              <dt>Refund</dt><dd><code>{{ row.refund_id or '—' }}</code></dd>
+              {% if row.end_reason %}<dt>Ending</dt><dd>{{ row.end_reason }}</dd>{% endif %}
+            </dl>
+          </details></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   {% else %}
-  <p class="muted">No rescues yet. <a href="/try">Start one</a>.</p>
+  <p class="mt-12 muted">No rescues yet. <a href="/try">Start one</a>.</p>
   {% endif %}
 </section>
-<p class="muted small"><a href="/judge.json">This ledger as JSON</a></p>
+
+<section class="section-gap" aria-label="Totals">
+  <div class="tiles">
+    <div class="tile"><span class="tile-label">Rescues</span><span class="tile-value">{{ view.count }}</span></div>
+    {# Money colours only when there is money in that state: amber held, green captured, purple refunded. #}
+    <div class="tile{% if view.totals.held != '0.00' %} held{% endif %}"><span class="tile-label">Held now</span><span class="tile-value">${{ view.totals.held }}</span></div>
+    <div class="tile{% if view.totals.captured != '0.00' %} charged{% endif %}"><span class="tile-label">Captured</span><span class="tile-value">${{ view.totals.captured }}</span></div>
+    <div class="tile{% if view.totals.refunded != '0.00' %} refunded{% endif %}"><span class="tile-label">Refunded</span><span class="tile-value">${{ view.totals.refunded }}</span></div>
+  </div>
+  {% if view.problems or view.pending_ops %}
+  <div class="alert warn" role="alert">{{ icon('i-info') }}<div>
+    <p><strong>Bookkeeping checks: {{ view.problems }} invariant problem{{ '' if view.problems == 1 else 's' }} · {{ view.pending_ops | length }} money call{{ '' if view.pending_ops | length == 1 else 's' }} in flight.</strong></p>
+    {% if view.pending_ops %}<ul>{% for op in view.pending_ops %}<li><code>{{ op.request_id }}</code>: {{ op.op }}, {{ op.attempts }} attempt{{ '' if op.attempts == 1 else 's' }}</li>{% endfor %}</ul>{% endif %}
+  </div></div>
+  {% else %}
+  <p class="bookkeeping">{{ icon('i-shield') }}Bookkeeping checks: all ok · 0 money calls in flight · {{ view.problems }} invariant problems</p>
+  {% endif %}
+</section>
+
+<section class="card section-gap" aria-labelledby="no-hold-h" id="no-hold">
+  <div class="card-head"><h2 class="h3" id="no-hold-h">No hold offered</h2><p class="fine">Runs that stopped at the quote. They never reach the rescues table: nothing was held.</p></div>
+  {% if view.no_hold %}
+  <ul class="nohold-list">
+    {% for n in view.no_hold %}
+    <li><span class="when">{{ n.at | utc }}</span><span class="what"><strong title="Fault class {{ n.fault_class }}">{{ n.title }}</strong><span class="reason">{{ n.reason }}</span></span><span class="pill voided">$0, no PayPal call</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="mt-12 muted">None in this deployment yet.</p>
+  {% endif %}
+</section>
+
+<div class="folds">
+  <details class="fold">
+    <summary>{{ icon('i-chev') }}Webhooks and reconciler <span class="muted">{{ view.webhooks.total }} webhooks stored · {% if reconcile %}last pass {{ reconcile.at | utc }}{% else %}no pass yet{% endif %}</span></summary>
+    <div class="fold-body">
+      <div>
+        <h3>Webhooks received</h3>
+        <p>{{ view.webhooks.total }} stored raw before any check.
+          {% for k, v in view.webhooks.outcomes | dictsort %}<span class="pill neutral">{{ k }} {{ v }}</span> {% endfor %}</p>
+        <p class="fine mt-12">applied: verified with PayPal and applied once · duplicate: same event id again, ignored · unverified: signature check failed, never applied.</p>
+      </div>
+      <div>
+        <h3>Reconciler</h3>
+        {% if reconcile %}
+        <p>Last pass {{ reconcile.at | utc }} ({{ 'startup' if reconcile.startup else 'periodic' }}): {{ reconcile.replayed }} replayed,
+          {{ reconcile.repaired }} repaired, {{ reconcile.voided }} voided, {{ reconcile.conflicts }} conflicts, {{ reconcile.errors }} errors.</p>
+        {% else %}
+        <p>No pass yet in this process. It runs at start-up and every five minutes.</p>
+        {% endif %}
+        <p class="fine mt-12">{{ policy }}</p>
+      </div>
+    </div>
+  </details>
+</div>
+
+<section class="end-next" aria-labelledby="end-next-h">
+  <h2 class="h3" id="end-next-h">Seen all three paths?</h2>
+  <p class="fine">Each run above links to its own page, with PayPal read live.</p>
+  <p class="actions"><a class="btn btn-primary" href="/try">Try another rescue {{ icon('i-arrow') }}</a><a class="btn btn-secondary" href="/">What Keyhold is</a></p>
+</section>
 {% endblock %}

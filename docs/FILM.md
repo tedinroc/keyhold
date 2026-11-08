@@ -54,7 +54,7 @@ hold captured from a real run's pages after the fact. "Edit" means text built in
 | 4 | 0:20-0:30 | Keyhold's home page: "No hold, no keystrokes. Only your server answering can charge you." At 0:26, cut to `/try` with "Typo in sshd_config" and its $9 price. | | UI |
 | 5 | 0:30-0:46 | Run A's quote: `sshd_config_error`, T1, $9.00, the evidence line, the quote hash. At 0:38, hard cut to the owner probe panel: user `probe`, key fingerprint, page check, spec hash sent as `custom_id`. | PayPal sandbox, Claude, test VM | Live (opening of the uncut recording) |
 | 6 | 0:46-1:44 | **The uncut take** (below). | PayPal sandbox, Claude, test VM | Live, one take |
-| 7 | 1:44-2:00 | Run B's status page while the agent types. Press "Stop and void the hold". Lines appear: "keyboard locked: the owner pressed Stop", the void with `void-…`, `ACTIVE -> VOIDED`; "PayPal, read live" shows the authorization `VOIDED`. 1x around the click. | PayPal sandbox, Claude, test VM | Live |
+| 7 | 1:44-2:00 | Run B's status page while the agent types. Press "Stop and void the hold" once. Key moments and the Full log fold show: "keyboard locked: the owner pressed Stop", the void with `void-…`, `ACTIVE -> VOIDED`; "PayPal, read live" shows the authorization `VOIDED`. 1x around the click. | PayPal sandbox, Claude, test VM | Live |
 | 8 | 2:00-2:18 | Run C: the free look answers `console_locked` and the page says "No hold offered" (to 2:08). Cut to run D's terminal: the hold line (order, authorization, $19.00), then "rescue ended: VOIDED: the agent gave up: …". | run C: PayPal sandbox, Claude, test VM. Run D: test VM, simulated PayPal, scripted agent | Live |
 | 9 | 2:18-2:30 | Run A again, in its warranty. Terminal: `docker stop` of run A's VM (`docker ps --filter label=keyhold.vm`). Status page: two warranty checks fail, a refund with `refund-…`, the rescue `REFUNDED`, and the refund under "PayPal, read live". Rehearse once off camera. | PayPal sandbox, test VM | Live, time-lapse |
 | 10 | 2:30-2:42 | Run E (see "Shot 10" below): the status page after the second probe pass, `kill -9` in a terminal, the restart, then `/judge` with one capture for the rescue and its `cap-…` request id. | PayPal sandbox, test VM | Live |
@@ -75,7 +75,7 @@ may change speed but never skip time:
 | Run page: the order (intent `AUTHORIZE`, $9.00), then the authorization id. Status page: the authorization `CREATED` $9.00 under "PayPal, read live", and the gate line "PayPal authorization … CREATED $9.00: keyboard allowed" | 1x | the order id and authorization id for at least 2 seconds |
 | Claude at the console: typed lines, console thumbnails, the agent's notes | [REAL CLAUDE RUN TIME] / about 25 s, for example 8x | nothing in particular; the console visibly changes |
 | `finished`, then the owner probe: results until two passes at least 10 s apart | 2x | each probe line as it lands |
-| Capture: authorization `CAPTURED`, capture `COMPLETED` $9.00, `final_capture` true, `cap-…` in "Two ticks per money call" | 1x, then hold 3 s on the last frame | the capture id and `cap-…` |
+| Capture: authorization `CAPTURED`, capture `COMPLETED` $9.00, `final_capture` true, `cap-…` under Audit details, "PayPal-Request-Ids: two ticks per money call" | 1x, then hold 3 s on the last frame | the capture id and `cap-…` |
 
 - Every speed change is shown by the speed label (for example "8x"), and a running clock of real
   elapsed time sits beside it. Both stay in one place and update in place with tabular figures.
@@ -145,7 +145,7 @@ Notes:
 |---|---|---|
 | the ssh failure (shot 1) | run A's console screenshot (shot 2) | the two lines in shot 3 |
 | the quote and the whole uncut take (shots 5-6) | the home page and `/try` (shot 4) | the closing card (shot 11) |
-| Stop on run B (shot 7) | `/judge` rows and the "Two ticks per money call" table, from the same runs | source tags, speed labels, clocks |
+| Stop on run B (shot 7) | `/judge` rows and the "PayPal answered" and "Webhook" ticks, from the same runs | source tags, speed labels, clocks |
 | run C's free look and run D's terminal (shot 8) | optional: the sandbox dashboard's record of the same capture, with account names and emails blurred | |
 | `docker stop` and the refund (shot 9) | | |
 | the kill and restart, or the chaos tests (shot 10) | | |

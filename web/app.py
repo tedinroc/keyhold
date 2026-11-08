@@ -39,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from keyhold.faults import TRY_FAULTS, get_fault
 from keyhold.pay.client import HANDLED_WEBHOOK_HEADERS, header_value
@@ -58,6 +59,18 @@ from .security import (
     session_cookie_kwargs,
 )
 from .services import Services, build_services
+from .story import (
+    KeyMoments,
+    code_paths,
+    evidence_markup,
+    hms,
+    paypal_table,
+    progress_view,
+    run_progress,
+    short_id,
+    status_title,
+    visible_moments,
+)
 from .views import (
     _record_view,
     as_json,
@@ -101,12 +114,51 @@ def _sse(event: str, data: Any, *, event_id: str | int | None = None) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-def _fault_cards() -> list[dict[str, Any]]:
+# The three demo paths on /try, in the order a judge should take them (D3): the capture first,
+# so a judge who does one path sees the money story; then Stop; then the honest no-hold stop.
+# Times from Break to the end: simulated (measured offline: about 30 s to the charge, 25 s for the
+# Stop path, a few seconds to the no-hold page) and on a KVM test VM with Claude (a boot and free
+# look of about a minute; the hosted capture came 1 min 45 s after the hold). "done" is the
+# outcome that path is there to show.
+_PATHS = {
+    "sshd-config-typo": {"path": 1, "outcome": "Fixed and charged", "short": "Charged", "sim": "~1 min",
+                         "vm": "~4 min", "chip": "hold", "icon": "f-sshd", "done": "charged"},
+    "fstab-missing-disk": {"path": 2, "outcome": "Stop, $0", "short": "Stop, $0", "sim": "~30 s",
+                           "vm": "~2 min", "chip": "hold · try Stop", "icon": "f-fstab", "done": "stopped"},
+    "grub-password": {"path": 3, "outcome": "No hold", "short": "No hold", "sim": "~10 s", "vm": "~1 min",
+                      "chip": "No hold", "icon": "f-grub", "done": "no_hold"},
+}
+# The three paths back to back, in minutes, without waiting for a server.
+_ALL_PATHS_MIN = {"sim": 2, "vm": 7}
+
+
+def _try_minutes(simulated: bool, warranty_wait_s: float = 0.0) -> int:
+    """About how long the three paths take: on a single test VM the first rescue's warranty keeps
+    the VM before the next path can start, so its length is added."""
+    if simulated:
+        return _ALL_PATHS_MIN["sim"]
+    return _ALL_PATHS_MIN["vm"] + int(-(-max(0.0, warranty_wait_s) // 60))
+
+
+def _fault_cards(simulated: bool = True, stop_window_s: float | None = None) -> list[dict[str, Any]]:
+    """The three /try cards, in path order. ``stop_window_s``: about how long Stop stays useful on
+    the simulated Stop path (the line under its button says so)."""
     cards = []
+    window = f" (about {max(5, int(round(stop_window_s / 5.0)) * 5)} s here)" if simulated and stop_window_s else ""
+    fine = {
+        "sshd-config-typo": "Starts a fresh copy with this fault, then quotes. Nothing is held yet.",
+        "fstab-missing-disk": f"Approve the hold, then press Stop while the agent works{window}: you pay $0.",
+        "grub-password": "Starts a fresh copy with this fault. Keyhold offers no hold here, by design.",
+    }
     blurbs = {
         "sshd-config-typo": "A misspelled option in sshd_config stops SSH from starting. The web page still answers.",
         "fstab-missing-disk": "A data disk was removed but stayed in /etc/fstab. The boot stops in emergency mode.",
         "grub-password": "The boot menu asks for a GRUB password nobody has. The console alone cannot fix this.",
+    }
+    short_blurbs = {
+        "sshd-config-typo": "SSH will not start after an edit.",
+        "fstab-missing-disk": "Boots to emergency mode.",
+        "grub-password": "The console alone cannot fix it.",
     }
     hints = {
         "sshd-config-typo": "ssh: connection refused since I edited sshd_config",
@@ -115,19 +167,33 @@ def _fault_cards() -> list[dict[str, Any]]:
     }
     for fault_id in TRY_FAULTS:
         fault = get_fault(fault_id)
+        path = _PATHS.get(fault.id, {})
+        price = f"{fault.price:.2f}" if fault.price is not None else None
+        whole = f"${fault.price:.0f}" if fault.price is not None else ""
+        chip = path.get("chip", "")
         cards.append(
             {
                 "id": fault.id,
                 "title": fault.title,
                 "fault_class": fault.fault_class,
                 "tier": fault.tier.value if fault.tier else None,
-                "price": f"{fault.price:.2f}" if fault.price is not None else None,
+                "price": price,
                 "blurb": blurbs.get(fault.id, ""),
+                "short_blurb": short_blurbs.get(fault.id, blurbs.get(fault.id, "")),
                 "note_hint": hints.get(fault.id, "what you saw before SSH stopped"),
                 "solvable": fault.solvable,
+                "path": path.get("path"),
+                "outcome": path.get("outcome", ""),
+                "short_outcome": path.get("short", ""),
+                "time": path.get("sim" if simulated else "vm", ""),
+                "chip": f"{whole} {chip}" if price else chip,
+                "icon": path.get("icon", "f-sshd"),
+                "fine": fine.get(fault.id, ""),
+                "whole": whole,
+                "goal": path.get("done", ""),
             }
         )
-    return cards
+    return sorted(cards, key=lambda c: c["path"] or 99)
 
 
 def create_app(settings: Settings | None = None, *, services: Services | None = None) -> FastAPI:
@@ -151,6 +217,12 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
     app.state.services = svc
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.filters["utc"] = lambda epoch: (fmt_time(epoch) or "").replace("T", " ").replace("Z", " UTC")
+    templates.env.filters["hms"] = hms
+    templates.env.filters["visible_moments"] = visible_moments
+    templates.env.filters["short_id"] = short_id
+    templates.env.filters["code_paths"] = code_paths
+    templates.env.filters["evidence"] = evidence_markup
+    templates.env.filters["status_title"] = status_title
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
     # -- middleware ---------------------------------------------------------------------------
@@ -170,6 +242,18 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
     async def api_error(request: Request, exc: ApiError) -> JSONResponse:
         return JSONResponse({"error": exc.message, "code": exc.code}, status_code=exc.status, headers=exc.headers)
 
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        """A browser asking for a page that is not there gets a page with a way on; everything
+        else (APIs, webhooks, static files, scripts) keeps the JSON answer."""
+        path = request.url.path
+        wants_html = "text/html" in request.headers.get("accept", "")
+        if not wants_html or path.startswith(("/api/", "/webhooks/", "/static/", "/healthz", "/judge.json")):
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=getattr(exc, "headers", None))
+        if exc.status_code == 404:
+            return error_page(request, 404, "Page not found", "There is nothing at this address.")
+        return error_page(request, exc.status_code, "That did not work", str(exc.detail))
+
     # -- helpers ------------------------------------------------------------------------------
 
     def session_of(request: Request) -> Session:
@@ -178,14 +262,25 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
     def ip_of(request: Request) -> str:
         return client_ip(request, trust_proxy=settings.trust_proxy)
 
+    agent_name = "The recorded agent" if settings.simulated else "Claude"
+    paypal_source = "FakePayPal" if settings.offline else "the PayPal sandbox"
+
+    def warranty_plan() -> Any:
+        return svc.orchestrator.config.probe_policy.warranty
+
     def page(request: Request, name: str, context: dict[str, Any], status: int = 200) -> HTMLResponse:
         session = session_of(request)
+        path = request.url.path
         base = {
             "settings": settings,
             "banners": settings.banners(),
+            "full_banners": path in ("/", "/try"),
             "csrf": session.csrf,
-            "path": request.url.path,
+            "path": path,
             "offline": settings.offline,
+            "agent_name": agent_name,
+            "paypal_source": paypal_source,
+            "owns_rescue": False,
         }
         base.update(context)
         response = templates.TemplateResponse(request, name, base, status_code=status)
@@ -193,7 +288,7 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
         return response
 
     def error_page(request: Request, status: int, title: str, message: str) -> HTMLResponse:
-        return page(request, "error.html", {"title": title, "message": message}, status)
+        return page(request, "error.html", {"title": title, "message": message, "status": status}, status)
 
     def api_guard(request: Request, *, csrf: bool = True, unlocked: bool = True) -> Session:
         session = session_of(request)
@@ -225,7 +320,12 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
         except UnknownRescue:
             return None
 
-    def snapshot(rec: Any, live: dict[str, Any] | None) -> dict[str, Any]:
+    def owns(request: Request, rescue_id: str) -> bool:
+        """The viewer started this rescue's run (the pages then say "you", else "the owner")."""
+        run = svc.runs.for_rescue(rescue_id)
+        return run is not None and run.owner == session_of(request).sid
+
+    def snapshot(rec: Any, live: dict[str, Any] | None, *, owner: bool = True) -> dict[str, Any]:
         run = svc.runs.for_rescue(rec.id)
         thumbs_run = run.id if run is not None else svc.runs.thumbs.run_for_rescue(rec.id)
         return rescue_snapshot(
@@ -236,7 +336,42 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
             thumbs=svc.runs.thumbs.list(thumbs_run) if thumbs_run else [],
             thumbs_run_id=thumbs_run,
             policy_label=svc.orchestrator.config.probe_policy.label,
+            plan=warranty_plan(),
+            agent=agent_name,
+            source=paypal_source,
+            owner=owner,
+            webhooks_verifiable=settings.webhooks_verifiable,
         )
+
+    def run_progress_for(run: TryRun, rec: Any = None) -> dict[str, Any]:
+        """The progress strip for a run page: from the rescue row once there is one."""
+        if rec is None and run.rescue_id:
+            rec = find_rescue(run.rescue_id)
+        if rec is not None:
+            return progress_view(rec, svc.ledger.events(rec.id), plan=warranty_plan(), agent=agent_name)
+        look = run.look
+        return run_progress(
+            run.stage,
+            no_quote_reason=look.reason if look is not None and look.quote is None else None,
+            honest_stop=run.stage == "no_quote" and look is not None and look.fault_class == "console_locked",
+            cancelling=run.stop_requested,
+            look_failed=run.look_failed,
+        )
+
+    def finished_examples() -> dict[str, str | None]:
+        """Links for "Short on time? See a finished one": the latest captured and stopped rescues
+        in the ledger (public pages), and the no-hold list on /judge."""
+        captured = stopped = None
+        for rec in reversed(svc.ledger.rescues()):
+            if captured is None and rec.state in (RescueState.WARRANTY_OK, RescueState.CAPTURED) and rec.captured_amount:
+                captured = f"/rescues/{rec.id}"
+            if stopped is None and rec.state is RescueState.VOIDED and rec.authorization_id \
+                    and rec.end_reason == "the owner pressed Stop":
+                stopped = f"/rescues/{rec.id}"
+            if captured and stopped:
+                break
+        return {"captured": captured, "stopped": stopped,
+                "no_hold": "/judge#no-hold" if svc.runs.no_hold_runs(limit=1) else None}
 
     async def live_read(rec: Any, *, fresh: bool = False) -> dict[str, Any]:
         return await run_in_threadpool(svc.paypal_view.read, rec, fresh=fresh)
@@ -255,28 +390,108 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
-        return page(request, "index.html", {"faults": _fault_cards()})
+        return page(request, "index.html", {"faults": _fault_cards(settings.simulated),
+                                            "try_minutes": try_minutes()})
+
+    def boot_span() -> str:
+        worlds = svc.runs.worlds
+        return worlds.boot_span() if hasattr(worlds, "boot_span") else "30 to 90 seconds"
+
+    def warranty_wait_s() -> float:
+        """How long a capture's warranty keeps the only test VM (0 when it does not)."""
+        if settings.simulated or svc.runs.slot_count > 1:
+            return 0.0
+        plan = warranty_plan()
+        return float(plan.interval_s) * int(plan.checks)
+
+    def try_minutes() -> int:
+        return _try_minutes(settings.simulated, warranty_wait_s())
+
+    def path_results(sid: str) -> dict[str, dict[str, Any]]:
+        """This browser's latest result on each /try path: what it showed ("Charged $9", "Stopped,
+        $0", "No hold"), where to see it, and whether it is the outcome the path is there for. A
+        charge whose warranty is still running counts: the money story is told."""
+        out: dict[str, dict[str, Any]] = {}
+        for run in svc.runs.runs():  # oldest first: a later run of the same fault wins
+            if run.owner != sid or run.fault_id not in _PATHS:
+                continue
+            result = None
+            if run.stage == "no_quote":
+                result = ("no_hold", "No hold", f"/runs/{run.id}")
+            elif run.rescue_id and (run.stage in ("warranty", "finished") or not run.active):
+                rec = find_rescue(run.rescue_id)
+                if rec is None:
+                    continue
+                href = f"/rescues/{rec.id}"
+                if rec.state in (RescueState.CAPTURED, RescueState.WARRANTY_OK) and rec.captured_amount \
+                        and rec.capture_status not in ("DECLINED", "DENIED", "FAILED"):
+                    result = ("charged", f"Charged ${rec.captured_amount:.2f}", href)
+                elif rec.state is RescueState.REFUNDED:
+                    result = ("refunded", "Refunded", href)
+                elif rec.state is RescueState.VOIDED and rec.authorization_id and rec.end_reason == "the owner pressed Stop":
+                    result = ("stopped", "Stopped, $0", href)
+                elif rec.state is RescueState.VOIDED and rec.authorization_id:
+                    result = ("voided", "Voided, $0", href)
+            if result is not None:
+                kind, label, href = result
+                out[run.fault_id] = {"kind": kind, "label": label, "href": href,
+                                     "ok": kind == _PATHS[run.fault_id]["done"]}
+        return out
+
+    def look_span() -> str:
+        worlds = svc.runs.worlds
+        return worlds.look_span() if hasattr(worlds, "look_span") else "20 to 60 seconds"
 
     def try_context(request: Request, **extra: Any) -> dict[str, Any]:
         session = session_of(request)
         ip = ip_of(request)
         mine = [r for r in svc.runs.runs() if r.owner == session.sid and r.active]
+        my_run = mine[0] if mine else None
+        busy = svc.runs.busy_view(session.sid)
+        now = svc.clock.now()
+        runs_left = svc.limiter.remaining("start", ip, limit=settings.runs_per_hour, window_s=3600.0)
+        next_run_at = (svc.limiter.next_at("start", ip, limit=settings.runs_per_hour, window_s=3600.0)
+                       if runs_left == 0 else None)
+        my_holds_slot = my_run is not None and svc.runs.holds_slot(my_run)
+        window = svc.runs.worlds.stop_window_s() if hasattr(svc.runs.worlds, "stop_window_s") else None
+        faults = _fault_cards(settings.simulated, window)
+        # The paths this browser has done: their cards say so, and "Start here" / "Next" moves to
+        # the first path not done yet, so a judge does not spend a run repeating one.
+        results = path_results(session.sid)
+        for card in faults:
+            card["done"] = results.get(card["id"])
+        next_path = next((c for c in faults if not (c["done"] and c["done"]["ok"])), None)
         context = {
-            "faults": _fault_cards(),
+            "faults": faults,
+            "next_id": next_path["id"] if next_path else None,
+            "all_done": next_path is None,
+            "try_minutes": try_minutes(),
+            "warranty_wait_min": int(-(-warranty_wait_s() // 60)),
+            "busy": busy,
+            "free_in_s": max(0, int(busy["free_at"] - now)) if busy["free_at"] else None,
+            "next_run_in_s": max(0, int(next_run_at - now)) if next_run_at else None,
+            "examples": finished_examples(),
+            "cancelled": request.query_params.get("cancelled") == "1",
+            "just_unlocked": request.query_params.get("unlocked") == "1" and session.unlocked,
+            "my_progress": run_progress_for(my_run) if my_run is not None else None,
+            "my_holds_slot": my_holds_slot,
+            "my_warranty": svc.runs.warranty_progress(my_run) if my_run is not None else None,
+            "my_free_at": (svc.runs.free_at(my_run) or (None, None))[0] if my_holds_slot else None,
             "unlocked": session.unlocked or not settings.passcode_required,
             "passcode_set": bool(settings.passcode),
             "slot_busy": svc.runs.slots_full(),
             "slot_message": svc.runs.slot_message(),
             "slots_total": svc.runs.slot_count,
-            "boot_span": svc.runs.worlds.boot_span() if hasattr(svc.runs.worlds, "boot_span") else "30 to 90 seconds",
+            "boot_span": boot_span(),
             "slots_free": svc.runs.slot_count - svc.runs.slots_used(),
             "problems": svc.runs.worlds.problems(),
             "paid_model": svc.runs.worlds.paid_model,
             "spend_remaining": f"{svc.spend.remaining():.2f}",
             "spend_cap": f"{settings.spend_cap_usd:.2f}",
-            "runs_left": svc.limiter.remaining("start", ip, limit=settings.runs_per_hour, window_s=3600.0),
+            "runs_left": runs_left,
+            "next_run_at": next_run_at,
             "runs_per_hour": settings.runs_per_hour,
-            "my_run": mine[0] if mine else None,
+            "my_run": my_run,
             "error": None,
         }
         context.update(extra)
@@ -302,7 +517,8 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
             return error_page(request, 404, "This link does not work",
                               "The judge link is wrong or was replaced. Use the passcode on /try instead.")
         session.unlock()
-        return RedirectResponse("/try", status_code=303)
+        # The page says once that this browser is unlocked.
+        return RedirectResponse("/try?unlocked=1", status_code=303)
 
     @app.post("/try/unlock")
     async def try_unlock(request: Request) -> Response:
@@ -359,8 +575,38 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
             note = str(form.get("note", ""))[:2000]
             run = await run_in_threadpool(svc.runs.start, fault_id, owner=session.sid, ip=ip, note=note)
         except TryRefused as exc:
+            if exc.code == "own_run":
+                # The same fault again (a double submit): go back to the run that is already going.
+                same = [r for r in svc.runs.runs() if r.owner == session.sid and r.active and r.fault_id == fault_id]
+                if same:
+                    return RedirectResponse(f"/runs/{same[0].id}", status_code=303)
             return page(request, "try.html", await try_ctx(request, error=exc.message), exc.status)
         return RedirectResponse(f"/runs/{run.id}", status_code=303)
+
+    @app.get("/try/status")
+    async def try_status(request: Request) -> JSONResponse:
+        """What /try polls every 10 s while the test server is busy, to turn the buttons back on."""
+        api_guard(request, csrf=False, unlocked=False)
+        session = session_of(request)
+        problems = await run_in_threadpool(svc.runs.worlds.problems)
+        busy = svc.runs.busy_view(session.sid)
+        now = svc.clock.now()
+        return JSONResponse(
+            {
+                "busy": busy["busy"],
+                "ready": not problems,
+                "message": busy["message"],
+                "mine": busy["mine"],
+                "watchUrl": busy["watch_url"],
+                "freeAt": hms(busy["free_at"]) if busy["free_at"] else None,
+                "freeInS": max(0, int(busy["free_at"] - now)) if busy["free_at"] else None,
+                "slotsFree": svc.runs.slot_count - svc.runs.slots_used(),
+                "slotsTotal": svc.runs.slot_count,
+                "runsLeft": svc.limiter.remaining("start", ip_of(request), limit=settings.runs_per_hour,
+                                                  window_s=3600.0),
+            },
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse)
     async def run_page(request: Request, run_id: str) -> Response:
@@ -375,7 +621,8 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
                 and rec.authorization_id:
             return RedirectResponse(f"/rescues/{run.rescue_id}", status_code=303)
         context = {
-            "run": run_view(run, svc.runs.thumbs.list(run.id)),
+            # Only the boot and the free look add screens; elsewhere the crop hugs the text.
+            "run": run_view(run, svc.runs.thumbs.list(run.id), tight=run.stage not in ("booting", "looking")),
             "quote": quote_view(rec.quote, run.look.title if run.look else None) if rec is not None else None,
             "probe": probe_view(rec.probe_spec, rec.probe_spec_hash) if rec is not None else None,
             "rescue": rec,
@@ -384,8 +631,43 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
             "minutes_left": None
             if run.quote_deadline is None
             else max(1, round((run.quote_deadline - svc.clock.now()) / 60)),
+            "seconds_left": None if run.quote_deadline is None else max(0, int(run.quote_deadline - svc.clock.now())),
+            "prog": run_progress_for(run, rec),
+            "boot_span": boot_span(),
+            "look_span": look_span(),
+            "elapsed_s": max(0, int(svc.clock.now() - run.created_at)),
+            # The free look has its own timer: a long boot must not make a normal look read as late.
+            "look_s": max(0, int(svc.clock.now() - run.look_started_at)) if run.look_started_at else 0,
+            "cancelling": run.stop_requested and run.stage in ("booting", "looking"),
+            "owns_rescue": True,
         }
         return page(request, "run.html", context)
+
+    @app.get("/api/runs/{run_id}")
+    async def run_status(request: Request, run_id: str) -> JSONResponse:
+        """The run page's fallback when its event stream closes: the stage and the progress strip,
+        for the browser that started the run only."""
+        session = api_guard(request, csrf=False, unlocked=False)
+        run = owned_run(session, svc.runs.get(run_id))
+        return JSONResponse({"stage": run.stage, "rescueId": run.rescue_id, "progress": run_progress_for(run)},
+                            headers={"Cache-Control": "no-store"})
+
+    @app.post("/runs/{run_id}/cancel")
+    async def cancel_run(request: Request, run_id: str) -> Response:
+        """Cancel before a hold: release the server and go back to /try. Same Stop underneath
+        (the quote, or an unapproved order, is voided); the page says "Nothing was held"."""
+        session = session_of(request)
+        form = await request.form()
+        if not session.csrf_ok(str(form.get("csrf", ""))):
+            return error_page(request, 403, "Security token missing", "Reload the page and try again.")
+        run = svc.runs.get(run_id)
+        if run is None or run.owner != session.sid:
+            return error_page(request, 404, "Run not found", "This run does not exist or was started in another browser.")
+        # Decided under the run's lock: if the hold went live meanwhile, that is Stop on the live
+        # page, never a cancel that would void a hold the owner just approved.
+        if await run_in_threadpool(svc.runs.cancel, run) == "live":
+            return RedirectResponse(f"/rescues/{run.rescue_id}", status_code=303)
+        return RedirectResponse("/try?cancelled=1", status_code=303)
 
     @app.get("/runs/{run_id}/events")
     async def run_events(request: Request, run_id: str) -> Response:
@@ -410,7 +692,7 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
                     yield _sse("thumb", thumb_view(run_id, thumb))
                 if current.version != version:
                     version = current.version
-                    yield _sse("run", run_view(current, []))
+                    yield _sse("run", {**run_view(current, []), "progress": run_progress_for(current)})
                 if current.stage not in PRE_PAYMENT:
                     yield _sse("end", {"stage": current.stage, "rescue_id": current.rescue_id})
                     return
@@ -439,11 +721,28 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
         if rec is None:
             return error_page(request, 404, "Rescue not found", "There is no rescue with that id in this ledger.")
         live = await live_read(rec)
-        snap = snapshot(rec, live)
+        session = session_of(request)
+        run = svc.runs.for_rescue(rec.id)
+        mine = run is not None and run.owner == session.sid
+        snap = snapshot(rec, live, owner=mine)
+        # While this rescue's warranty keeps the only test server, the next path starts later.
+        slot_free_at = None
+        if run is not None and run.stage == "warranty" and svc.runs.holds_slot(run) and svc.runs.slots_full():
+            slot_free_at = (svc.runs.free_at(run) or (None, None))[0]
+        prices = {c["id"]: c["whole"] for c in _fault_cards(settings.simulated)}
         return page(
             request,
             "rescue.html",
-            {"snap": snap, "rescue_id": rec.id, "can_stop": can_stop(session_of(request), rec)},
+            {
+                "snap": snap,
+                "rescue_id": rec.id,
+                "can_stop": can_stop(session, rec),
+                "owns_rescue": mine,
+                "fault_id": run.fault_id if run is not None else None,
+                "slot_free_at": slot_free_at,
+                "slot_free_in_s": max(0, int(slot_free_at - svc.clock.now())) if slot_free_at else None,
+                "prices": prices,
+            },
         )
 
     @app.get("/api/rescues/{rescue_id}")
@@ -455,7 +754,7 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
         if rec is None:
             raise ApiError(404, "No such rescue.", "not_found")
         live = await live_read(rec)
-        return JSONResponse(snapshot(rec, live), headers={"Cache-Control": "no-store"})
+        return JSONResponse(snapshot(rec, live, owner=owns(request, rec.id)), headers={"Cache-Control": "no-store"})
 
     @app.get("/rescues/{rescue_id}/events")
     async def rescue_events(request: Request, rescue_id: str) -> Response:
@@ -466,18 +765,26 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
         rec = find_rescue(rescue_id)
         if rec is None:
             raise ApiError(404, "No such rescue.", "not_found")
-        return StreamingResponse(_rescue_stream(rescue_id), media_type="text/event-stream", headers=_SSE_HEADERS)
+        return StreamingResponse(_rescue_stream(rescue_id, owner=owns(request, rescue_id)),
+                                 media_type="text/event-stream", headers=_SSE_HEADERS)
 
-    async def _rescue_stream(rescue_id: str) -> AsyncIterator[str]:
+    async def _rescue_stream(rescue_id: str, *, owner: bool = True) -> AsyncIterator[str]:
         rec = svc.ledger.get(rescue_id)
         live = await live_read(rec)
-        snap = snapshot(rec, live)
+        snap = snapshot(rec, live, owner=owner)
         yield "retry: 3000\n\n"
         yield _sse("snapshot", snap)
+        # Key moments keep counts (lock check n, probe pass k of 2, warranty check n of N):
+        # replay the snapshot's events into the counter, then continue with the stream.
+        moments = KeyMoments(warranty_total=(snap["progress"].get("warranty") or {}).get("total"), owner=owner)
+        for event in svc.ledger.events(rescue_id):
+            entry = timeline_entry(event)
+            if entry is not None and event.id <= snap["cursor"]["event"]:
+                moments.add(entry, event.data)
         event_cursor = snap["cursor"]["event"]
         delivery_cursor = snap["cursor"]["delivery"]
         thumb_cursor = max((t["n"] for t in snap["thumbs"]), default=0)
-        last_sig = _state_sig(_state_payload(rec, live))
+        last_sig = _state_sig(_state_payload(rec, live, owner=owner))
         started = time.monotonic()
         last_read = last_ping = started
         ended_at: float | None = None
@@ -490,11 +797,14 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
                 changed = True
                 entry = timeline_entry(event)
                 if entry is not None:
-                    yield _sse("log", entry, event_id=event.id)
+                    if event.kind == "warranty_started":
+                        moments.warranty_total = int(event.data.get("checks") or 0) or moments.warranty_total
+                    yield _sse("log", {**entry, "moment": moments.add(entry, event.data)}, event_id=event.id)
             for delivery in svc.ledger.deliveries(rescue_id=rescue_id, after_id=delivery_cursor, raw=False):
                 delivery_cursor = delivery.id
                 changed = True
-                yield _sse("log", webhook_entry(delivery))
+                entry = webhook_entry(delivery)
+                yield _sse("log", {**entry, "moment": moments.add(entry)})
             run = svc.runs.for_rescue(rescue_id)
             if run is not None:
                 for item in svc.runs.thumbs.list(run.id, after=thumb_cursor):
@@ -504,7 +814,7 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
             if changed or now - last_read >= settings.paypal_poll_s:
                 live = await live_read(rec)
                 last_read = now
-                state = _state_payload(rec, live)
+                state = _state_payload(rec, live, owner=owner)
                 sig = _state_sig(state)
                 if sig != last_sig:
                     last_sig = sig
@@ -514,7 +824,7 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
                 ended_at = ended_at if ended_at is not None else now
                 if _ticks_complete(rec) or now - ended_at >= settings.sse_tail_s:
                     live = await live_read(rec, fresh=True)
-                    yield _sse("state", _state_payload(rec, live))
+                    yield _sse("state", _state_payload(rec, live, owner=owner))
                     yield _sse("end", {"state": rec.state.value})
                     return
             if now - started > settings.sse_max_s:
@@ -523,22 +833,28 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
                 last_ping = now
                 yield ": ping\n\n"
 
-    def _state_payload(rec: Any, live: dict[str, Any] | None) -> dict[str, Any]:
+    def _state_payload(rec: Any, live: dict[str, Any] | None, *, owner: bool = True) -> dict[str, Any]:
         run = svc.runs.for_rescue(rec.id)
+        ticks = ticks_view(rec, svc.ledger.ops(rec.id))
         return {
             "rescue": _record_view(rec),
             "money": money_view(rec, live),
             "paypal": live,
-            "ticks": ticks_view(rec, svc.ledger.ops(rec.id)),
+            "ticks": ticks,
             "invariants": svc.ledger.check_invariants(rec.id),
             "run": None if run is None else {"stage": run.stage, "stage_label": run.stage_label,
                                              "detail": run.detail, "active": run.active},
+            "progress": progress_view(rec, svc.ledger.events(rec.id), live=live, plan=warranty_plan(),
+                                      agent=agent_name, owner=owner),
+            "paypal_table": paypal_table(rec, live, ticks, source=paypal_source, owner=owner,
+                                         webhooks_verifiable=settings.webhooks_verifiable),
         }
 
     def _state_sig(state: dict[str, Any]) -> str:
         """What a status page would show differently; PayPal's read time alone is not a change."""
         live = {k: v for k, v in (state.get("paypal") or {}).items() if k != "checked_at"}
-        return json.dumps({**state, "paypal": live}, sort_keys=True, default=str)
+        table = {k: v for k, v in (state.get("paypal_table") or {}).items() if k != "checked"}
+        return json.dumps({**state, "paypal": live, "paypal_table": table}, sort_keys=True, default=str)
 
     def _ticks_complete(rec: Any) -> bool:
         if rec.authorization_id and rec.auth_webhook_at is None:
@@ -687,7 +1003,8 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
 
     @app.get("/judge", response_class=HTMLResponse)
     async def judge(request: Request) -> HTMLResponse:
-        view = await run_in_threadpool(judge_view, svc.ledger, runs_by_rescue=runs_by_rescue())
+        view = await run_in_threadpool(judge_view, svc.ledger, runs_by_rescue=runs_by_rescue(),
+                                       no_hold=svc.runs.no_hold_runs())
         return page(
             request,
             "judge.html",
@@ -696,7 +1013,8 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
 
     @app.get("/judge.json")
     async def judge_json() -> JSONResponse:
-        view = await run_in_threadpool(judge_view, svc.ledger, runs_by_rescue=runs_by_rescue())
+        view = await run_in_threadpool(judge_view, svc.ledger, runs_by_rescue=runs_by_rescue(),
+                                       no_hold=svc.runs.no_hold_runs())
         return JSONResponse(as_json({"mode": settings.mode, "world": settings.world, **view}))
 
     @app.get("/healthz")
@@ -707,6 +1025,8 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
             "paypal": "sandbox" if settings.mode == "live" else "offline (in memory)",
             "world": settings.world,
             "judge_mode": settings.judge_mode,
+            # The warranty plan in force, so an operator can confirm KEYHOLD_WARRANTY_* took effect.
+            "warranty": warranty_plan().short_label,
             "slot": "busy" if svc.runs.slots_full() else "free",
             "slots": {"used": svc.runs.slots_used(), "total": svc.runs.slot_count},
             "reconciler": svc.reconcile_status or None,

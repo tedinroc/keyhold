@@ -429,18 +429,65 @@ _SIMULATED: dict[str, Callable[[str], World]] = {
 }
 
 
+class _PacedModel:
+    """The recorded agent with a pause before each action after the free look, so the simulated
+    Stop path lasts long enough to press Stop. Every other attribute is the wrapped model's."""
+
+    def __init__(self, inner: Any, pause_s: float, sleep: Callable[[float], None] = time.sleep) -> None:
+        self._inner = inner
+        self._pause_s = pause_s
+        self._sleep = sleep
+        self._calls = 0
+
+    def respond(self, **kwargs: Any) -> Any:
+        self._calls += 1
+        if self._calls > 1:  # the first answer is the free look: no pause there
+            self._sleep(self._pause_s)
+        return self._inner.respond(**kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+# The Stop path: the simulated agent is paced on this fault only.
+STOP_PATH = "fstab-missing-disk"
+
+
 class SimulatedWorlds:
     kind = "simulated"
     paid_model = False
 
+    def __init__(self, *, stop_path_turn_s: float = 0.0, sleep: Callable[[float], None] = time.sleep) -> None:
+        self.stop_path_turn_s = stop_path_turn_s
+        self._sleep = sleep
+        self._stop_steps: int | None = None
+
     def problems(self) -> list[str]:
         return []
+
+    def stop_window_s(self) -> float:
+        """About how long Stop can still void the hold on the Stop path: the agent's actions (paced
+        or not) plus the 10 s between the two passes of the judge-mode probe."""
+        if self._stop_steps is None:
+            self._stop_steps = max(0, _fstab_world("0" * 12).model.remaining - 1)  # minus the free look
+        return self.stop_path_turn_s * self._stop_steps + 10.0
+
+    def boot_span(self) -> str:
+        """How long the boot usually takes, for the run page: the scripted server starts at once."""
+        return "a few seconds"
+
+    def look_span(self) -> str:
+        """How long the free look usually takes: the recorded agent answers at once."""
+        return "a few seconds"
 
     def boot(self, fault_id: str, run_id: str, progress: Progress) -> World:
         if fault_id not in TRY_FAULTS or fault_id not in _SIMULATED:
             raise WorldError(f"fault {fault_id!r} is not offered here")
         progress("Building a scripted copy of the broken server (no VM in this mode).")
-        return _SIMULATED[fault_id](run_id)
+        world = _SIMULATED[fault_id](run_id)
+        if fault_id == STOP_PATH and self.stop_path_turn_s > 0:
+            world.model = _PacedModel(world.model, self.stop_path_turn_s, self._sleep)
+        return world
 
 
 # --------------------------------------------------------------------------------------------
@@ -532,6 +579,10 @@ class VmWorlds:
             return "5 to 30 seconds" if self.runner.kvm_available() else "30 to 90 seconds"
         except Exception:
             return "30 to 90 seconds"
+
+    def look_span(self) -> str:
+        """How long the free look usually takes: a screenshot and one model answer."""
+        return "20 to 60 seconds"
 
     def boot(self, fault_id: str, run_id: str, progress: Progress) -> World:
         from keyhold.console.image import (

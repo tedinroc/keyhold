@@ -201,8 +201,13 @@ def test_judge_link_unlocks_with_one_click(make_web) -> None:
     assert token and token != "open-sesame" and "open-sesame" not in token
     assert "Break this server" not in web.client.get("/try").text
     response = web.client.get(f"/j/{token}", follow_redirects=False)
-    assert response.status_code == 303 and response.headers["location"] == "/try"
-    assert "Break this server" in web.client.get("/try").text
+    assert response.status_code == 303 and response.headers["location"] == "/try?unlocked=1"
+    # The page says once that this browser is unlocked; a plain /try does not repeat it.
+    assert "Unlocked for this browser." in web.client.get("/try?unlocked=1").text
+    page = web.client.get("/try").text
+    assert "Break this server" in page and "Unlocked for this browser." not in page
+    # The note follows the session, not the address: another browser is still locked.
+    assert "Unlocked for this browser." not in TestClient(web.client.app).get("/try?unlocked=1").text
 
 
 def test_a_wrong_judge_link_unlocks_nothing(make_web) -> None:

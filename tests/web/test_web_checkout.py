@@ -122,10 +122,12 @@ def test_run_page_shows_quote_evidence_and_probe(web) -> None:
     run = web.start("sshd-config-typo")
     page = web.client.get(f"/runs/{run.id}").text
     rec = web.svc.ledger.get(run.rescue_id)
-    assert "[FAILED] Failed to start ssh.service - OpenBSD Secure Shell server." in page
+    # The evidence line is word for word, with "[FAILED]" marked as a failure.
+    assert '<span class="ev-fail">[FAILED]</span> Failed to start ssh.service - OpenBSD Secure Shell server.' in page
+    assert "an error in <code>/etc/ssh/sshd_config</code>" in page  # the path in the diagnosis is a mono chip
     assert rec.quote_hash in page and rec.probe_spec_hash in page
     assert "custom_id" in page and "intent <strong>AUTHORIZE</strong>" in page
-    assert "Approve the hold (simulated PayPal)" in page
+    assert "Approve<span class=\"wide-only\"> the hold</span> (simulated PayPal)" in page
     assert "web-sdk/v6/core" in page  # data attribute only; offline never loads it
     assert "simulated.test" not in page  # the probe host is not printed
 
@@ -176,3 +178,4 @@ def test_a_paypal_outage_at_order_time_is_reported_and_retryable(web) -> None:
     web.fake.clear_injections()
     order_id = web.order(run)  # same request id replayed: one order
     assert web.fake.order_count() == 1 and web.fake.get_order(order_id).amount == Decimal("9.00")
+

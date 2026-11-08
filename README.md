@@ -61,7 +61,14 @@ Judges: the testing steps are in [docs/JUDGES.md](docs/JUDGES.md).
 
 Judge mode (`KEYHOLD_JUDGE_MODE=1`, the default) shortens the timing so a run fits in a demo: the
 two probe passes need to be at least 10 seconds apart (probes every 5 seconds), and the warranty
-checks every minute for 24 minutes. The pages label this timing as judge mode.
+checks every minute for 24 minutes. `KEYHOLD_WARRANTY_CHECKS` and `KEYHOLD_WARRANTY_INTERVAL_S`
+shorten it further for a shared demo server (6 checks 20 seconds apart take about 2 minutes). The
+pages label the timing in force as judge mode, with the real plan of 24 hourly checks beside it;
+a plan of 24 hours or more is never called compressed. A shared judge server also wants
+`KEYHOLD_TRY_RUNS_PER_HOUR=6`, so a judge can repeat a path; once an address has used its runs,
+/try turns the buttons off and says when the next run is allowed. In the simulated world the
+recorded agent pauses `KEYHOLD_SIM_STOP_PATH_TURN_S` seconds (default 3) before each action on the
+Stop path (fstab), so there is time to press Stop.
 
 ## PayPal APIs used, and why
 
@@ -157,7 +164,7 @@ system_reset). `keyhold/console/fake.py` is a scripted console for tests and the
 
 ## Invariants and how they are tested
 
-`uv run pytest -q` collects 1058 tests: 1055 pass and 3 are skipped by default (they boot real
+`uv run pytest -q` collects 1156 tests: 1153 pass and 3 are skipped by default (they boot real
 guests; see "Run it locally"). The tests make no network calls: a fixture refuses any socket
 connection that is not to the loopback address and removes `PAYPAL_*`, `ANTHROPIC_*` and
 `KEYHOLD_*` variables from the environment.
@@ -194,9 +201,15 @@ with the PayPal sandbox, an x86-64 test VM under KVM and Claude Haiku 5.5. A san
 $9.00 hold with the JS SDK v6 button; the agent fixed the sshd typo through the gated console; the
 probe passed twice; PayPal captured $9.00 1 minute 45 seconds after the hold (capture
 `7WP61145AR824644E`, 7 agent turns, about $0.0039 of model spend), and all 24 warranty checks
-passed. Two earlier rescues on a local test VM captured and passed their warranty too. `tools/live_check.py` ran 23 steps
-against the sandbox: 22 passed, none failed, and webhook verification was skipped. IDs, timelines and the two problems the first runs exposed:
-[docs/evidence/](docs/evidence/README.md).
+passed. On the redesigned pages, with the webhook registered, three more hosted runs followed: the
+sshd typo again (captured $9.00 80 seconds after the hold), the T2 fault "fstab lists a disk that
+is gone" (captured $19.00 after 87 seconds, 12 agent turns), and the same fault with the owner
+pressing **Stop** 6 seconds after the keyboard was lent: the hold was voided a second later, $0
+was charged and nothing was typed after Stop. Those three runs received six PayPal webhook
+deliveries, one of them out of order, and all six passed `verify-webhook-signature`. Two earlier
+rescues on a local test VM captured and passed their warranty too. `tools/live_check.py` ran 23
+steps against the sandbox: 22 passed and none failed. IDs, timelines and the two problems the
+first runs exposed: [docs/evidence/](docs/evidence/README.md).
 
 ## Run it locally
 
@@ -228,6 +241,8 @@ Data goes to `var/`.
    Create a sandbox personal account to approve payments with.
 2. For webhooks, the app must be reachable over HTTPS. Add a webhook on the sandbox app for
    `https://<your host>/webhooks/paypal` with the ten event types listed above, and copy its id.
+   `uv run --env-file .env python tools/register_webhook.py https://<your host>` does this through
+   the REST API (or prints the id of the one already there).
    Without it money still moves, but no delivery can be verified and the second tick never shows.
 3. `cp .env.example .env` and fill in `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`,
    `PAYPAL_WEBHOOK_ID` and `KEYHOLD_TRY_PASSCODE` (live mode refuses to start runs without a
@@ -266,8 +281,8 @@ Data goes to `var/`.
      [tools/vm/README.md](tools/vm/README.md)).
 6. `uv run --env-file .env python -m web`
 
-`/healthz` reports the mode, the world, whether webhooks can be verified, and the reconciler's last
-pass.
+`/healthz` reports the mode, the world, the warranty plan in force, whether webhooks can be
+verified, and the reconciler's last pass.
 
 ### Real guests
 
@@ -326,13 +341,13 @@ Claude is one part of a rescue and has no way to move money.
 
 ## Honest limits
 
-- **What has run where.** Three full rescues ran against the PayPal sandbox with Claude Haiku 5.5,
-  all of the "Typo in sshd_config" fault: two on a local test VM and one on the hosted Keyhold
-  (an x86-64 cloud VM with KVM), and `tools/live_check.py` passed against the sandbox
-  ([docs/evidence/](docs/evidence/README.md)). The other faults have run on real
-  guests only with `FakePayPal` and a scripted agent (`tools/vm/prove.py`). Claude Opus 5.5 is
-  supported but was not used in the live runs. Webhook verification has not run against real
-  deliveries yet.
+- **What has run where.** Six rescues ran against the PayPal sandbox with Claude Haiku 5.5: two
+  on a local test VM and four on the hosted Keyhold (an x86-64 cloud VM with KVM). They covered
+  two faults, "Typo in sshd_config" and "fstab lists a disk that is gone"; five captured and one
+  was stopped by the owner and voided. `tools/live_check.py` passed against the sandbox, and six
+  real webhook deliveries were verified ([docs/evidence/](docs/evidence/README.md)). The other
+  faults have run on real guests only with `FakePayPal` and a scripted agent
+  (`tools/vm/prove.py`). Claude Opus 5.5 is supported but was not used in the live runs.
 - **No hosting provider console.** Keyhold drives a local QEMU guest over QMP. Using a real
   provider's web console needs a `Console` adapter for that provider's API, which does not exist
   yet.

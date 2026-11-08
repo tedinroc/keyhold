@@ -19,6 +19,10 @@
     if (!button) return;
     function sync() { button.setAttribute("aria-pressed", effective() === "dark" ? "true" : "false"); }
     sync();
+    if (window.matchMedia) {
+      var query = window.matchMedia("(prefers-color-scheme: dark)");
+      if (query.addEventListener) query.addEventListener("change", sync);
+    }
     button.addEventListener("click", function () {
       var next = effective() === "dark" ? "light" : "dark";
       root.setAttribute("data-theme", next);

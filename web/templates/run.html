@@ -1,119 +1,227 @@
 {% extends "base.html" %}
-{% from "_macros.html" import stage_steps, quote_card %}
-{% block title %}{{ run.fault_title }} · Keyhold{% endblock %}
-{% block body_attrs %}data-page="run" data-run-id="{{ run.id }}" data-stage="{{ run.stage }}"{% if rescue %} data-rescue-id="{{ rescue.id }}"{% endif %}{% if quote %} data-amount="{{ quote.amount }}"{% endif %} data-sdk-url="{{ sdk_url }}"{% endblock %}
+{% from "_macros.html" import icon, status_line, progress, console, zoom_dialog, quote_audit %}
+{% set p = prog %}
+{% block title %}{{ p.status | status_title }} · {{ run.fault_title }} · Keyhold{% endblock %}
+{% block body_attrs %}data-page="run" data-run-id="{{ run.id }}" data-stage="{{ run.stage }}" data-title="{{ run.fault_title }} · Keyhold"{% if rescue %} data-rescue-id="{{ rescue.id }}"{% endif %}{% if quote %} data-amount="{{ quote.amount }}"{% endif %} data-sdk-url="{{ sdk_url }}"{% endblock %}
 {% block main %}
-<nav class="crumbs" aria-label="Breadcrumb"><a href="/try">Try it</a> <span aria-hidden="true">/</span> Run <code>{{ run.id }}</code></nav>
-<div class="page-head">
-  <h1>{{ run.fault_title }}</h1>
-  <p class="lede" id="run-detail" aria-live="polite">{{ run.detail }}</p>
+{% set waiting = run.stage in ['booting', 'looking'] %}
+<div class="head-row">
+  <div class="crumb"><nav aria-label="Breadcrumb"><a href="/try">Try it</a></nav><span aria-hidden="true">/</span><h1 class="title">{{ run.fault_title }}</h1></div>
+  {% if waiting or payable %}
+  <p class="flag" id="live-flag"><span class="dot" aria-hidden="true"></span><span id="live-text">Live</span></p>
+  {% else %}
+  <p class="flag" id="live-flag" data-final="1"><span class="dot" aria-hidden="true"></span><span id="live-text">Final</span></p>
+  {% endif %}
 </div>
-{{ stage_steps(run.stage) }}
+<p class="flag-note" id="live-note" role="status" hidden></p>
+{{ status_line(p) }}
+{{ progress(p) }}
 
-{% if run.stage in ['booting', 'looking'] %}
-<section class="cols">
-  <div class="card">
-    <h2 class="card-title">Console</h2>
-    <figure class="screen" id="screen">
-      {% if run.thumbs %}{% set t = run.thumbs[-1] %}<img src="{{ t.url }}" alt="Console screen, {{ t.label }}" width="{{ t.width }}" height="{{ t.height }}">
-      {% else %}<div class="screen-empty"><span class="live-dot" aria-hidden="true"></span> Waiting for the first screenshot</div>{% endif %}
-    </figure>
-  </div>
-  <div class="card">
-    <h2 class="card-title">Progress</h2>
-    <ol class="notes" id="notes">
-      {% for n in run.notes %}<li><time>{{ n.at[11:19] }}</time> {{ n.text }}</li>{% endfor %}
+{% if waiting %}
+{# ---------- boot and free look: nothing to do yet ---------- #}
+{% set looking = run.stage == 'looking' %}
+{% set t_boot = '%d:%02d' | format(elapsed_s // 60, elapsed_s % 60) %}
+{% set t_look = '%d:%02d' | format(look_s // 60, look_s % 60) %}
+<div class="look-grid">
+  {# The timer is in the card only; the console says what it waits for. #}
+  {{ console(run.thumbs, title='Console · free look', lent=False, typed=None, stepper=False,
+             empty=('Cancelling · the server is released when its boot ends' if cancelling
+                    else ('Taking the first screenshot…' if looking else 'Starting the server…'))) }}
+  <section class="card" aria-labelledby="next-h">
+    {% if cancelling %}
+    <h2 class="h3" id="next-h">Cancelling this run</h2>
+    <p class="wait-note"><span class="dot" aria-hidden="true"></span><span>The server is released when its boot ends. Nothing is held and nothing is charged.</span></p>
+    <p class="mt-12"><a class="btn btn-secondary" href="/try">Back to Try it {{ icon('i-arrow') }}</a></p>
+    {% else %}
+    <h2 class="h3" id="next-h">Nothing to do yet</h2>
+    {% if looking %}
+    <p class="wait-note"><span class="dot" aria-hidden="true"></span><span>Free look: reading the screen · <span id="elapsed" data-since="{{ look_s }}">{{ t_look }}</span> · usually {{ look_span }}.</span></p>
+    <p class="fine mt-12">This page moves on by itself. {{ agent_name }} sees screenshots only and cannot press a key. Next: a fixed price and the screen lines it is based on, before anything is held.</p>
+    {% else %}
+    <p class="wait-note"><span class="dot" aria-hidden="true"></span><span>Booting · <span id="elapsed" data-since="{{ elapsed_s }}">{{ t_boot }}</span> so far; usually {{ boot_span }}.</span></p>
+    <p class="fine mt-12">This page moves on by itself. Then {{ agent_name | lower if agent_name.startswith('The') else agent_name }} takes a free look: screenshots only, no keys. Then you get a fixed price and the screen lines it is based on, before anything is held.</p>
+    {% endif %}
+    <ol class="notes" id="notes" aria-label="Progress notes">
+      {% for n in run.notes %}<li><time>{{ n.at[11:19] }}</time><span>{{ n.text }}</span></li>{% endfor %}
     </ol>
-    <p class="muted">This page updates by itself.</p>
-  </div>
-</section>
-
-{% elif payable and quote %}
-<section class="cols">
-  <div class="stack">
-    {{ quote_card(quote, probe) }}
-  </div>
-  <div class="stack">
-    <section class="card checkout" aria-labelledby="checkout-title">
-      <h2 id="checkout-title" class="card-title">Hold ${{ quote.amount }} with PayPal</h2>
-      <p>Approving creates a PayPal order with intent <strong>AUTHORIZE</strong> for ${{ quote.amount }} and authorizes
-        it. Nothing is captured unless your probe passes. Stop, a give-up or a failed probe voids the hold.</p>
-      {% if offline %}
-      <p class="note">Offline mode: there is no PayPal window. The button creates the order in FakePayPal, approves it as a
-        simulated buyer, then authorizes it, through the same server endpoints the PayPal JS SDK v6 flow uses.</p>
-      <button class="button button-primary button-wide" type="button" id="offline-approve">Approve the hold (simulated PayPal)</button>
-      {% else %}
-      {% if settings.judge_buyer_email %}
-      <div class="buyer-login" aria-label="Sandbox buyer login">
-        <p class="muted">PayPal opens its sandbox login. Log in as this test buyer (test money only):</p>
-        <dl class="kv">
-          <dt>Email</dt><dd><code id="buyer-email">{{ settings.judge_buyer_email }}</code>
-            <button class="button button-quiet button-small" type="button" data-copy="buyer-email">Copy</button></dd>
-          {% if settings.judge_buyer_password %}
-          <dt>Password</dt><dd><code id="buyer-password">{{ settings.judge_buyer_password }}</code>
-            <button class="button button-quiet button-small" type="button" data-copy="buyer-password">Copy</button></dd>
-          {% endif %}
-        </dl>
-      </div>
-      {% endif %}
-      <div id="paypal-area" class="paypal-area">
-        <paypal-button id="paypal-button" type="pay" class="paypal-gold" hidden></paypal-button>
-        <p class="muted" id="paypal-loading"><span class="live-dot" aria-hidden="true"></span> Loading PayPal (JS SDK v6, sandbox)</p>
-      </div>
-      {% endif %}
-      <p class="checkout-status" id="checkout-status" role="status" aria-live="polite"></p>
-      {% if minutes_left is not none %}<p class="muted">Check out within {{ minutes_left }} minute{{ '' if minutes_left == 1 else 's' }}, or the server is released and nothing is held.</p>{% endif %}
-    </section>
-    <section class="card">
-      <h2 class="card-title">Console during the free look</h2>
-      <figure class="screen" id="screen">
-        {% if run.thumbs %}{% set t = run.thumbs[-1] %}<img src="{{ t.url }}" alt="Console screen during the free look" width="{{ t.width }}" height="{{ t.height }}">{% endif %}
-      </figure>
-      <p class="muted">Screenshots only. No key was pressed.</p>
-      {% if run.owner_note %}<p class="owner-note"><span class="muted">Your note, read as data:</span> {{ run.owner_note }}</p>{% endif %}
-    </section>
-    {% if rescue %}
-    <form method="post" action="/rescues/{{ rescue.id }}/stop" class="inline-form">
+    <form method="post" action="/runs/{{ run.id }}/cancel" class="inline-form">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button class="button button-quiet" type="submit">Cancel this run</button>
-      <span class="muted">Releases the server. Nothing is held yet, so nothing is charged.</span>
+      <button class="btn btn-link" type="submit">Cancel this run</button>
     </form>
     {% endif %}
-  </div>
-</section>
+  </section>
+</div>
+
+{% elif payable and quote %}
+{# ---------- quote and checkout ---------- #}
+{% set whole = '$' ~ (quote.amount | float | round(0) | int) if quote.amount.endswith('.00') else '$' ~ quote.amount %}
+<div class="co-grid">
+  <section class="q-sum" aria-labelledby="q-h">
+    <p class="eyebrow" id="q-h">The quote</p>
+    <p class="price">${{ quote.amount }}</p>
+    <div class="price-meta"><p class="h3">Fixed price</p><p class="fine" title="Tier {{ quote.tier }}">set before any key is pressed</p></div>
+    <p class="diag">{{ quote.title | code_paths }}</p>
+  </section>
+
+  <section class="card checkout" aria-labelledby="checkout-title" id="checkout">
+    <div class="co-head">
+      <h2 class="co-title" id="checkout-title" tabindex="-1">Approve a ${{ quote.amount }} hold</h2>
+      <span class="ill" aria-hidden="true">{{ icon('i-hold') }}</span>
+    </div>
+    <p class="co-money"><strong>You pay $0 now.</strong> {{ 'FakePayPal' if offline else 'PayPal' }} holds {{ whole }} of test money. It becomes a charge only if your server answers twice. Stop releases it.</p>
+    {% if offline %}
+    <div class="paypal-area" id="paypal-area">
+      <button class="btn btn-primary btn-block" type="button" id="offline-approve">Approve<span class="wide-only"> the hold</span> (simulated PayPal)</button>
+    </div>
+    {# The three simulated steps fold away, so the button stays near the top on a phone. #}
+    <details class="how-sim">
+      <summary>{{ icon('i-chev') }}What this button does</summary>
+      <ol class="steps3">
+        <li><span class="k">1</span><span>It creates the order in FakePayPal.</span></li>
+        <li><span class="k">2</span><span>A simulated buyer approves it. There is no PayPal window and no login.</span></li>
+        <li><span class="k">3</span><span>The hold is authorized, and only then is the keyboard lent.</span></li>
+      </ol>
+      <p class="offline-note">Offline mode: the same server endpoints the PayPal JS SDK v6 flow uses.</p>
+    </details>
+    {% else %}
+    <ol class="steps3">
+      <li><span class="k">1</span><span>Press the PayPal button.</span></li>
+      {% if settings.judge_buyer_email %}
+      <li><span class="k">2</span><span>Log in as the test buyer (sandbox, test money only). <span class="phone-only">On a phone PayPal opens a new tab, so copy these first.</span>
+        <span class="buyer" aria-label="Sandbox buyer login">
+          <span class="row"><code id="buyer-email">{{ settings.judge_buyer_email }}</code><button class="btn btn-secondary btn-copy" type="button" data-copy="buyer-email">{{ icon('i-copy') }}<span class="copy-label">Copy email</span></button></span>
+          {% if settings.judge_buyer_password %}<span class="row"><code id="buyer-password">{{ settings.judge_buyer_password }}</code><button class="btn btn-secondary btn-copy" type="button" data-copy="buyer-password">{{ icon('i-copy') }}<span class="copy-label">Copy password</span></button></span>{% endif %}
+        </span></span></li>
+      {% else %}
+      <li><span class="k">2</span><span>Log in with a PayPal sandbox buyer account (test money only).</span></li>
+      {% endif %}
+      <li><span class="k">3</span><span>Approve. PayPal's window says <em>Pay</em>: it is a hold, and nothing is charged until your server passes.</span></li>
+    </ol>
+    <div id="paypal-area" class="paypal-area">
+      <paypal-button id="paypal-button" type="pay" class="paypal-gold" hidden></paypal-button>
+      <p class="pp-slot" id="paypal-loading" role="status" aria-live="polite">Loading PayPal (JS SDK v6, sandbox)…</p>
+    </div>
+    {% endif %}
+    <p class="checkout-status" id="checkout-status" role="status" aria-live="polite"></p>
+    <div class="co-foot">
+      {% if seconds_left is not none %}<p class="fine" id="deadline" data-seconds="{{ seconds_left }}">Approve within {{ minutes_left }} minute{{ '' if minutes_left == 1 else 's' }}, or the server is released and nothing is held.</p>{% endif %}
+      <form method="post" action="/runs/{{ run.id }}/cancel" class="inline-form" id="cancel-form">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="btn btn-link" type="submit">Cancel this run</button>
+      </form>
+    </div>
+    <p class="sr-only" id="deadline-alert" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="card q-ev" aria-labelledby="ev-h">
+    <h2 class="h3" id="ev-h">Seen on the screen</h2>
+    <p class="fine">The proof behind the diagnosis, from the free look.</p>
+    <ul class="evidence">{% for line in quote.evidence %}<li>{{ line | evidence }}</li>{% endfor %}</ul>
+    {{ console(run.thumbs, title='Console · free look', lent=False, typed=None, stepper=False) }}
+    <p class="seal">{{ icon('i-seal') }}<span>Screenshots only. No key was pressed. Your check is sealed into the PayPal order, so it cannot change after you approve.</span></p>
+    {% if run.owner_note %}<p class="owner-note"><span class="muted">Your note, read as data:</span> {{ run.owner_note }}</p>{% endif %}
+  </section>
+</div>
+
+<div class="folds">
+  {% set plan_lines = quote.plan.split('\n') | select | list %}
+  <details class="fold">
+    <summary>{{ icon('i-chev') }}Plan <span class="muted">{{ plan_lines | length }} step{{ '' if plan_lines | length == 1 else 's' }}</span></summary>
+    <div class="fold-body"><p class="plan">{{ quote.plan }}</p></div>
+  </details>
+  <details class="fold audit">
+    <summary>{{ icon('i-chev') }}Audit details <span class="muted">quote hash, fault class, owner probe, PayPal intent</span></summary>
+    <div class="fold-body">
+      <div>
+        <h3>The PayPal call</h3>
+        <p>Approving creates a PayPal order with intent <strong>AUTHORIZE</strong> for ${{ quote.amount }} and authorizes
+          it. Nothing is captured unless your probe passes. Stop, a give-up or a failed probe voids the hold.</p>
+        {% if rescue %}<p class="fine">Rescue <code>{{ rescue.id }}</code> · run <code>{{ run.id }}</code></p>{% endif %}
+      </div>
+      {{ quote_audit(quote, probe) }}
+    </div>
+  </details>
+</div>
+{# Goes to the approve button (it does not approve): shown only while that button is off screen. #}
+<a class="sticky-cta" id="sticky-cta" href="#paypal-area" data-hidden="1">{{ icon('i-hold') }}Go to approve the ${{ quote.amount }} hold{{ icon('i-arrow', 'ic arrow-down') }}</a>
+
+{% elif run.stage == 'no_quote' %}
+{# ---------- the honest stop: no hold offered ---------- #}
+<div class="nh-grid">
+  <section aria-labelledby="seen-h">
+    <h2 class="h3" id="seen-h">Seen on the screen</h2>
+    <div class="section-gap-sm">{{ console(run.thumbs, title='Console · free look', lent=False, typed=None, stepper=False) }}</div>
+    {# The caption says what is on the screen; the reason is in the headline and below. #}
+    <p class="figure-cap">{% if run.fault_id == 'grub-password' %}GRUB stops at “Enter username:”, then asks for a password. The console gives neither.{% else %}{{ run.no_quote_reason }}{% endif %}</p>
+    <div class="why">
+      <h2 class="h3">Why Keyhold stops here</h2>
+      {% if run.fault_class == 'console_locked' %}
+      <p>This is the honest stop: the fix needs a password the console does not give, so Keyhold does not take a hold
+        it cannot earn. Nothing was held and nothing was charged.</p>
+      {% else %}
+      <p>Keyhold quotes only what it can fix from the console. Nothing was held and nothing was charged.</p>
+      {% endif %}
+    </div>
+  </section>
+  <aside class="card cost" aria-labelledby="cost-h">
+    <p class="m-label" id="cost-h">What this cost you</p>
+    <p class="zero">$0</p>
+    <div class="actions">
+      <a class="btn btn-primary btn-block" href="/judge#no-hold">See it in the ledger {{ icon('i-arrow') }}</a>
+      <a class="btn btn-secondary btn-block" href="/try">Try another fault</a>
+    </div>
+    <ul class="cost-list">
+      <li>{{ icon('i-nohold') }}No hold taken</li>
+      <li>{{ icon('i-cloud-off') }}No PayPal call</li>
+      <li>{{ icon('i-key-off') }}No key pressed: screenshots only</li>
+    </ul>
+  </aside>
+</div>
+<div class="folds">
+  <details class="fold audit">
+    <summary>{{ icon('i-chev') }}Audit details <span class="muted">fault class, free-look notes, timing</span></summary>
+    <div class="fold-body">
+      <dl class="kv">
+        <dt>Fault class</dt><dd><code>{{ run.fault_class }}</code></dd>
+        <dt>Run</dt><dd><code>{{ run.id }}</code> · {{ run.world_label or run.world_kind }}</dd>
+        <dt>Reason</dt><dd>{{ run.no_quote_reason }}</dd>
+      </dl>
+      <ol class="notes" aria-label="Progress notes">{% for n in run.notes %}<li><time>{{ n.at[11:19] }}</time><span>{{ n.text }}</span></li>{% endfor %}</ol>
+    </div>
+  </details>
+</div>
 
 {% else %}
-<section class="card narrow" aria-labelledby="end-title">
-  {% if run.stage == 'no_quote' %}
-  <h2 id="end-title" class="card-title">No hold offered</h2>
-  <p>{{ run.no_quote_reason }}</p>
-  {% if run.fault_class == 'console_locked' %}
-  <p>This is the honest stop: the fix needs a password the console does not give, so Keyhold does not take a hold
-    it cannot earn. Nothing was held and nothing was charged.</p>
-  {% else %}
-  <p>Nothing was held and nothing was charged.</p>
-  {% endif %}
-  {% elif run.stage == 'expired' %}
-  <h2 id="end-title" class="card-title">Quote expired</h2>
-  <p>{{ run.detail }}</p>
-  {% elif run.stage == 'failed' %}
-  <h2 id="end-title" class="card-title">The run could not start</h2>
-  <p>{{ run.detail }}</p>
-  {% else %}
-  <h2 id="end-title" class="card-title">{{ run.stage_label }}</h2>
-  <p>{{ run.detail }}</p>
-  {% endif %}
-  {% if run.thumbs %}{% set t = run.thumbs[-1] %}
-  <figure class="screen"><img src="{{ t.url }}" alt="Last console screen" width="{{ t.width }}" height="{{ t.height }}"></figure>
-  {% endif %}
-  <p class="actions">
-    <a class="button button-primary" href="/try">Try another fault</a>
-    {% if rescue %}<a class="button" href="/rescues/{{ rescue.id }}">Ledger entry</a>{% endif %}
-  </p>
-</section>
+{# ---------- other ends before a hold: expired, cancelled, could not start ---------- #}
+<div class="nh-grid">
+  <section aria-labelledby="seen-h">
+    {% if run.thumbs %}
+    <h2 class="h3" id="seen-h">The last screen</h2>
+    <div class="section-gap-sm">{{ console(run.thumbs, title='Console', lent=False, typed=None, stepper=False) }}</div>
+    {% else %}
+    <h2 class="h3" id="seen-h">What happened</h2>
+    {% endif %}
+    <div class="why"><p>{{ run.detail }}</p></div>
+  </section>
+  <aside class="card cost" aria-labelledby="cost-h">
+    <p class="m-label" id="cost-h">What this cost you</p>
+    <p class="zero">$0</p>
+    <ul class="cost-list">
+      <li>{{ icon('i-nohold') }}Nothing held</li>
+      <li>{{ icon('i-key-off') }}The keyboard was never lent</li>
+    </ul>
+    <div class="actions">
+      <a class="btn btn-primary btn-block" href="/try">Try another fault {{ icon('i-arrow') }}</a>
+      {% if run.stage in ['expired', 'failed'] %}<a class="btn btn-secondary btn-block" href="/try#fault-{{ run.fault_id }}">Run this fault again</a>{% endif %}
+      <a class="btn btn-secondary btn-block" href="/judge">See all runs</a>
+    </div>
+  </aside>
+</div>
 {% endif %}
+{{ zoom_dialog() }}
 {% endblock %}
 {% block scripts %}
+<script src="/static/console.js"></script>
 <script src="/static/run.js"></script>
 {% if payable and quote %}<script src="/static/checkout.js"></script>{% endif %}
 {% endblock %}

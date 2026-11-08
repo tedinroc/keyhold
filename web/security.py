@@ -214,6 +214,16 @@ class RateLimiter:
                 return limit
             return max(0, limit - sum(1 for t in hits if t > now - window_s))
 
+    def next_at(self, bucket: str, key: str, *, limit: int, window_s: float) -> float | None:
+        """When the next attempt will be allowed (epoch seconds), or None if one is allowed now.
+        Read only: it records nothing."""
+        now = self._now()
+        with self._lock:
+            hits = [t for t in self._hits.get((bucket, key), ()) if t > now - window_s]
+        if len(hits) < limit:
+            return None
+        return hits[len(hits) - limit] + window_s
+
 
 def session_cookie_kwargs(request: Request) -> dict[str, Any]:
     return {

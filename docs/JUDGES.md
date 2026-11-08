@@ -26,45 +26,56 @@ The banners at the top of every page say what is real in this deployment:
   Claude.
 
 Timing is in judge mode: capture after two probe passes at least 10 seconds apart, and warranty
-checks every minute for 24 minutes (each minute stands in for an hour). The status page labels
-this.
+checks every minute for 24 minutes (each minute stands in for an hour). A deployment can shorten
+the warranty with `KEYHOLD_WARRANTY_CHECKS` and `KEYHOLD_WARRANTY_INTERVAL_S`; 6 checks 20 seconds
+apart (about 2 minutes) keep one capture from holding a shared test server for 24 minutes. The
+pages state the plan in force, for example "re-checked every 20 s, 6 times (compressed for the
+demo; the real plan is 24 hourly checks)".
 
 ## 1. Capture: the server is fixed, so the hold is charged (T1, $9)
 
 1. Open `{{HOSTED_URL}}/`. It explains the lock on one screen.
 2. Open **Try a rescue** (`/try`), enter the passcode and press **Unlock**.
-3. Under **Pick a fault**, press **Break this server** on **Typo in sshd_config**.
-4. The run page boots a fresh copy of the broken server and takes the free look: screenshots
-   only, no key is pressed. When the quote is ready you see:
-   - fault class `sshd_config_error`, tier T1, $9.00;
-   - the evidence quoted from the screen, for example
-     `[FAILED] Failed to start ssh.service - OpenBSD Secure Shell server.`;
-   - the plan, the quote hash, and the owner probe fixed for this rescue (SSH user `probe`, the
-     probe key's fingerprint, the page check with its expected text or sha256, and the spec hash
-     that is sent as the order's `custom_id`).
-5. Press the PayPal button under **Hold $9.00 with PayPal**. In the PayPal window, log in with the
-   sandbox buyer and approve the payment. You have 15 minutes before an unpaid quote expires.
-6. The page reports the order it created (intent `AUTHORIZE`, $9.00), then that PayPal holds $9.00
-   with the authorization id, and opens the live status page.
+3. Press **Break this server** on the **Start here** card, **Typo in sshd_config**.
+4. Every run and status page leads with one sentence and the progress strip Quote, Hold,
+   Keyboard, Probe, then Charged or Voided, with a plate under it that says whether the keyboard
+   is locked or lent, and why. The run page boots a fresh copy of the broken server and takes the
+   free look: screenshots only, no key is pressed. When the quote is ready you see:
+   - $9.00, fixed price, tier T1, and the diagnosis;
+   - **Seen on the screen**: the evidence quoted from the screen, for example
+     `[FAILED] Failed to start ssh.service - OpenBSD Secure Shell server.`, over the free-look
+     screenshot cropped to its text;
+   - **Plan** and **Audit details** (closed folds): the plan, the fault class `sshd_config_error`,
+     the quote hash, and the owner probe fixed for this rescue (SSH user `probe`, the probe key's
+     fingerprint, the page check with its expected text or sha256, and the spec hash that is sent
+     as the order's `custom_id`).
+5. Press the PayPal button in **Approve a $9.00 hold**. The sandbox buyer login is right next to
+   it, with Copy buttons. In the PayPal window, log in and approve the payment. You have 15
+   minutes before an unpaid quote expires.
+6. The page reports the order, then that PayPal holds $9.00, and opens the live status page.
 7. On the status page:
-   - **PayPal, read live** shows the order and the authorization (id, status, amount, expiry) as
-     PayPal returns them now. The authorization reads `CREATED` while the agent works.
-   - **What happened** lists every gate check ("PayPal authorization … CREATED $9.00: keyboard
-     allowed"), every line the agent typed (the console password shows as `[console password]`),
-     the agent's notes, and then the owner probe results.
+   - The plate reads **Keyboard lent: hold live**, with PayPal's last answer, when it was checked
+     and how many checks so far. The money box shows $9.00 on hold with the one **Stop** button.
+   - **Key moments**, beside the console, follows the lock checks, the last few lines the agent
+     typed (the console password shows as `[console password]`), firewall refusals, the probe and
+     PayPal's answers. **Full log** (a fold) lists every row: each gate check ("PayPal authorization
+     … CREATED $9.00: keyboard allowed"), every line typed, the agent's notes and every probe.
    - After the agent calls `finished`, the probe runs every 5 seconds. Two passes at least 10
      seconds apart, with no failure between, lead to the capture.
-   - **PayPal, read live** then shows the authorization `CAPTURED` and a capture for $9.00 with
-     `final_capture` true.
-   - **Two ticks per money call** shows each call's `PayPal-Request-Id` (`order-…`, `auth-…`,
-     `cap-…` followed by the rescue id) and the time of PayPal's API answer (first tick). For the
-     authorization and the capture it also shows when the verified webhook arrived (second tick);
-     the order has no webhook. Sandbox webhooks can arrive well after the API answer; the page
-     keeps streaming for up to 3 minutes after the run ends to catch them.
-   - **Ledger checks** shows no invariant problems.
-8. The warranty then re-probes the server every minute for 24 minutes. You do not need to wait:
-   it keeps running on the server and `/judge` shows the outcome later (`WARRANTY_OK`, or
-   `REFUNDED` after two failed checks in a row).
+   - **PayPal, read live** shows each object as PayPal returns it now: its id, PayPal's own status
+     word, what that status means, the amount, **PayPal answered** (the time of the API answer,
+     the first tick) and **Webhook** (the verified webhook, the second tick; the order has none).
+     After the capture: the authorization `CAPTURED` and a capture `COMPLETED` for $9.00 with
+     `final_capture`. Sandbox webhooks can arrive well after the API answer; the page keeps
+     streaming for up to 3 minutes after the run ends to catch them.
+   - **Audit details** (a fold) holds each call's `PayPal-Request-Id` (`order-…`, `auth-…`,
+     `cap-…` followed by the rescue id), the full ids, the owner probe and the **Ledger checks**
+     (no invariant problems).
+8. The page then reads **Fixed. Charged $9.00.** and tells **How your $9.00 moved**. The warranty
+   re-probes the server on the plan the page states. You do not need to wait: it keeps running on
+   the server and `/judge` shows the outcome later (`WARRANTY_OK`, or `REFUNDED` after two failed
+   checks in a row). The page offers the next path; while the warranty keeps a single test VM, its
+   button says when that path opens, and `/try` marks the Stop path card **Next**.
 
 With the recorded agent in offline mode, approval to capture took 21 seconds in our run. With
 Claude on a test VM it takes longer: each turn is one model request plus a screenshot, up to 30
@@ -75,17 +86,19 @@ turns and 20 minutes.
 1. Go back to `/try` and press **Break this server** on **fstab lists a disk that is gone**. The
    quote is `fstab_bad_entry`, T2, $19.00.
 2. Approve the hold in the PayPal window as before.
-3. While the agent is typing, press **Stop and void the hold** on the status page. Stop also
-   works while the probe runs, as long as the capture has not happened. The recorded agent of the
-   simulated world is fast: press Stop within about 20 seconds of approving.
-4. You should see, in this order: "keyboard locked: the owner pressed Stop", a void with
-   `PayPal-Request-Id void-…`, the state `ACTIVE -> VOIDED` (or `PROBING -> VOIDED`), and the
-   authorization `VOIDED` under **PayPal, read live**. No capture exists. The void's second tick
-   appears when the `PAYMENT.AUTHORIZATION.VOIDED` webhook is verified.
+3. While the agent is typing, press **Stop and void the hold** on the status page. One press is
+   enough. Stop also works while the probe runs, as long as the capture has not happened. The
+   recorded agent of the simulated world is fast: press Stop within about 20 seconds of approving.
+4. The page reads **Stopped. $0 charged.** Key moments show "You pressed Stop. Keyboard locked,
+   void sent." and then the hold released. The **Full log** has "keyboard locked: the owner pressed
+   Stop", the void with `PayPal-Request-Id void-…`, and the state change in words (the raw
+   `ACTIVE -> VOIDED` is its tooltip and is in **Audit details**). **PayPal, read live** shows the
+   authorization `VOIDED`. No capture exists. The void's second tick appears when the
+   `PAYMENT.AUTHORIZATION.VOIDED` webhook is verified.
 
 In the simulated world the recorded agent types `mkfs.ext4 /dev/vdb` a few steps in. The
-keystroke firewall refuses it before it reaches the console, and the refusal is listed in **What
-happened**.
+keystroke firewall refuses it before it reaches the console; the refusal shows as a callout above
+**Key moments** and in the **Full log**.
 
 ## 3. Honest stop: a fault the console cannot fix gets no hold
 
@@ -101,11 +114,12 @@ If the model names a priced class instead, a hold is offered; the agent is then 
 
 ## 4. The ledger
 
-- `{{HOSTED_URL}}/judge` lists every rescue: fault, quote, state, PayPal order, authorization,
-  capture and refund ids, which webhook ticks arrived, how it ended, and its invariant checks.
-  Above the table: totals held, captured and refunded, invariant problems, money calls in flight,
-  webhook outcomes (`applied`, `duplicate`, `unverified` and others), and the reconciler's last
-  pass.
+- `{{HOSTED_URL}}/judge` lists every rescue first: fault, time, the outcome in words (the raw
+  state is in its tooltip), the amount, the API and webhook ticks, and its invariant checks, with
+  the order, authorization, capture and refund ids in a fold per row. Under the table: totals
+  held, captured and refunded, a bookkeeping line (invariant problems, money calls in flight),
+  the runs that were offered no hold, and a fold with the webhook outcomes (`applied`,
+  `duplicate`, `unverified` and others) and the reconciler's last pass.
 - `{{HOSTED_URL}}/judge.json` is the same data as JSON.
 - `{{HOSTED_URL}}/healthz` reports the mode, the world, whether webhooks can be verified, money
   calls in flight, and unprocessed or unverified webhook deliveries.
@@ -157,9 +171,14 @@ holding a received delivery's `headers` and `body`; `--webhook-only` skips the h
 ## If something gets in the way
 
 - **The test server is in use**: there is one test server at a time. A test VM stays up through
-  its 24-minute warranty, because the warranty re-probes it. Watch that run on `/judge` and try
-  again later.
-- **Runs left this hour**: each address may start 4 runs per hour.
+  its warranty, because the warranty re-probes it. `/try` names the run that holds it, links to
+  **Watch it live**, says when a warranty or an unpaid quote frees it, and turns the buttons back
+  on by itself. When the warranty is your own, it says so, with the check count and the time.
+- **Runs left this hour**: each address may start a few runs per hour (4 unless the deployment
+  sets `KEYHOLD_TRY_RUNS_PER_HOUR`; `/try` shows how many are left). A run cancelled before its
+  hold counts too. `/try` marks the paths this browser has already done, so the next one is the
+  marked card. Once the runs are used, `/try` turns the buttons off, says when the next run is
+  allowed, and links to finished runs.
 - **Model budget**: `/try` stops starting runs when the model budget for the last 24 hours is
   nearly used up.
 - **Quote expired**: an unpaid quote releases the server after 15 minutes. Nothing was held.
@@ -179,7 +198,7 @@ Each row names something you can check in the repository or on `/try`.
 
 ## What the browser cannot trigger, and where it is tested
 
-The test suite runs without any account or network (`uv run pytest -q`: 1058 tests, 1055 pass, 3
+The test suite runs without any account or network (`uv run pytest -q`: 1156 tests, 1153 pass, 3
 are skipped because they boot real guests).
 
 | Case | Test |

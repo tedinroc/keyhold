@@ -48,6 +48,82 @@ def test_plan_defaults_and_labels() -> None:
             WarrantyPlan(**bad)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("plan", "label", "short"),
+    [
+        (
+            WarrantyPlan.judge(interval_s=20.0, checks=6),
+            "Warranty (judge mode, compressed): re-probed every 20 seconds, 6 times (2 minutes in all); "
+            "the real plan is 24 hourly checks.",
+            "re-checked every 20 s, 6 times (compressed for the demo; the real plan is 24 hourly checks)",
+        ),
+        (
+            WarrantyPlan.judge(),
+            "Warranty (judge mode, compressed): re-probed every minute for 24 minutes; each minute stands in "
+            "for an hour.",
+            "re-checked every minute, 24 times (compressed for the demo: each minute stands in for an hour)",
+        ),
+        (
+            WarrantyPlan.judge(interval_s=60.0, checks=1),
+            "Warranty (judge mode, compressed): re-probed every minute, once (1 minute in all); the real plan "
+            "is 24 hourly checks.",
+            "re-checked every minute, once (compressed for the demo; the real plan is 24 hourly checks)",
+        ),
+        (
+            WarrantyPlan(),
+            "Warranty: re-probed every hour for 24 hours.",
+            "re-checked every hour, 24 times",
+        ),
+        (
+            # Outside judge mode a short plan is not "for the demo", and the label and the short
+            # label say the same thing.
+            WarrantyPlan(interval_s=1800.0, checks=12),
+            "Warranty: re-probed every 30 minutes, 12 times (6 hours in all), shorter than the standard 24 "
+            "hourly checks.",
+            "re-checked every 30 min, 12 times (shorter than the standard 24 hourly checks)",
+        ),
+        (
+            # Judge mode with the real plan configured (KEYHOLD_WARRANTY_CHECKS=24,
+            # KEYHOLD_WARRANTY_INTERVAL_S=3600): nothing is compressed, so neither label says so.
+            WarrantyPlan.judge(interval_s=3600.0, checks=24),
+            "Warranty: re-probed every hour for 24 hours.",
+            "re-checked every hour, 24 times",
+        ),
+        (
+            # Sparser than the standard plan but over the same 24 hours: not compressed either.
+            WarrantyPlan.judge(interval_s=7200.0, checks=12),
+            "Warranty: re-probed every 2 hours, 12 times (24 hours in all).",
+            "re-checked every 2 h, 12 times",
+        ),
+        (
+            WarrantyPlan(interval_s=7200.0, checks=12),
+            "Warranty: re-probed every 2 hours, 12 times (24 hours in all).",
+            "re-checked every 2 h, 12 times",
+        ),
+    ],
+)
+def test_warranty_labels_read_correctly_for_any_plan(plan: WarrantyPlan, label: str, short: str) -> None:
+    # The hosted demo runs a two-minute warranty (KEYHOLD_WARRANTY_CHECKS=6, _INTERVAL_S=20): its
+    # label must not claim that "each 20 seconds stands in for an hour".
+    assert plan.label == f"{label} Two failed checks in a row refund the full capture."
+    assert plan.short_label == short
+    assert "stands in for an hour" not in plan.label or plan.is_hour_per_minute
+    # "compressed" only for a plan shorter than 24 hours, in both labels alike.
+    assert ("compressed" in plan.label) == ("compressed" in plan.short_label) == (
+        plan.window_s < 24 * HOUR and plan.judge_mode
+    )
+
+
+def test_a_one_check_warranty_still_refunds_after_two_failures_in_a_row() -> None:
+    # The label promises "Two failed checks in a row refund the full capture" for any count: with
+    # one scheduled check, a failure adds a confirmation check, so the promise holds.
+    schedule = WarrantySchedule(WarrantyPlan.judge(interval_s=20.0, checks=1), 0.0)
+    first = schedule.record(ProbeResult(False, False, False, "connection refused", 20.0))
+    assert first.verdict is WarrantyVerdict.RUNNING and schedule.next_due() == 40.0
+    second = schedule.record(ProbeResult(False, False, False, "connection refused", 40.0))
+    assert second.refund
+
+
 def test_all_checks_pass_gives_ok_after_24_hours(clock) -> None:
     start = clock.now()
     probe, calls = scripted(clock, [True] * 24)

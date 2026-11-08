@@ -12,34 +12,58 @@
   {% block head %}{% endblock %}
 </head>
 <body data-csrf="{{ csrf }}" data-mode="{{ settings.mode }}" {% block body_attrs %}{% endblock %}>
+  {% include "_sprite.html" %}
   <a class="skip" href="#main">Skip to content</a>
-  <header class="topbar">
-    <div class="wrap topbar-inner">
-      <a class="brand" href="/" aria-label="Keyhold home">
-        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="2" width="18" height="20" rx="4" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="10" r="3" fill="currentColor"/><path d="M10.8 12.5h2.4l.8 5h-4z" fill="currentColor"/></svg>
-        <span>Keyhold</span>
-      </a>
+  <header class="top">
+    <div class="wrap top-in">
+      <a class="brand" href="/" aria-label="Keyhold home"><svg class="mark" aria-hidden="true" focusable="false"><use href="#mark"/></svg><span>Keyhold</span></a>
+      {% set on_try = path.startswith('/try') or path.startswith('/runs') or (path.startswith('/rescues') and owns_rescue) %}
       <nav class="nav" aria-label="Main">
         <a href="/" {% if path == '/' %}aria-current="page"{% endif %}>What it is</a>
-        <a href="/try" {% if path.startswith('/try') or path.startswith('/runs') %}aria-current="page"{% endif %}>Try it</a>
-        <a href="/judge" {% if path.startswith('/judge') or path.startswith('/rescues') %}aria-current="page"{% endif %}>Ledger</a>
+        <a href="/try" {% if on_try %}aria-current="page"{% endif %}>Try it</a>
+        <a href="/judge" {% if path.startswith('/judge') or (path.startswith('/rescues') and not on_try) %}aria-current="page"{% endif %}>Ledger</a>
       </nav>
-      <button class="theme-toggle" type="button" data-theme-toggle aria-label="Dark theme" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z" fill="currentColor"/></svg>
+      <button class="icon-btn theme-toggle" type="button" data-theme-toggle aria-label="Dark theme" aria-pressed="false">
+        <svg class="ic i-moon" aria-hidden="true" focusable="false"><use href="#i-moon"/></svg>
+        <svg class="ic i-sun" aria-hidden="true" focusable="false"><use href="#i-sun"/></svg>
       </button>
     </div>
   </header>
-  <div class="banners wrap" role="region" aria-label="How this deployment runs">
-    {% for b in banners %}
-    <p class="banner banner-{{ b.tone }}"><strong>{{ b.title }}.</strong> {{ b.text }}</p>
+  <div class="wrap" role="region" aria-label="How this deployment runs">
+    {% set notes = banners | rejectattr('tone', 'equalto', 'warn') | list %}
+    {% set warns = banners | selectattr('tone', 'equalto', 'warn') | list %}
+    {% if full_banners %}
+    <div class="banners">
+      {% for b in banners %}
+      <p class="banner banner-{{ b.tone }}{% if b.tone != 'warn' %} banner-note{% endif %}"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-info"/></svg><span><strong>{{ b.title }}.</strong> {{ b.text }}</span></p>
+      {% endfor %}
+    </div>
+    {% else %}
+    {% for b in warns %}
+    <div class="banners"><p class="banner banner-warn"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-info"/></svg><span><strong>{{ b.title }}.</strong> {{ b.text }}</span></p></div>
     {% endfor %}
+    {% endif %}
+    {# The one-line mode note: every page but / and /try, and on a phone there too. The full
+       text stays in the page, inside the fold. #}
+    {# A phone gets the short label so the note stays on one line; the full words are in the fold. #}
+    {% set short_mode = {(True, True): 'Offline, simulated', (True, False): 'Offline mode', (False, True): 'Sandbox, simulated', (False, False): 'PayPal sandbox'}[(offline, settings.simulated)] %}
+    <details class="modebar{% if full_banners %} modebar-phone{% endif %}">
+      <summary><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-info"/></svg><span class="mb-long">{% for b in notes %}<strong>{{ b.title }}.</strong> {% endfor %}{% if offline %}No money moves.{% else %}Test money only.{% endif %}</span><span class="mb-short"><strong>{{ short_mode }}.</strong> {% if offline %}No money moves.{% else %}Test money only.{% endif %}</span></summary>
+      <div class="modebar-body">
+        {% for b in notes %}<p><strong>{{ b.title }}.</strong> {{ b.text }}</p>{% endfor %}
+      </div>
+    </details>
   </div>
   <main id="main" class="wrap" tabindex="-1">
     {% block main %}{% endblock %}
   </main>
-  <footer class="wrap footer">
+  <footer class="foot"><div class="wrap">
+    {% if offline %}
+    <p>Keyhold. Offline demo: no PayPal account, no money moves. No hold, no keystrokes.</p>
+    {% else %}
     <p>Keyhold. PayPal sandbox only: this deployment never touches live PayPal. No hold, no keystrokes.</p>
-  </footer>
+    {% endif %}
+  </div></footer>
   <script src="/static/common.js"></script>
   {% block scripts %}{% endblock %}
 </body>

@@ -1,100 +1,210 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% set exhausted = runs_left == 0 %}
+{# The viewer's own run holds the test server in its warranty, or while a cancel waits for the boot. #}
+{% set mine_waiting = slot_busy and busy.mine and (busy.mine_stage == 'warranty' or busy.mine_cancelling) %}
+{% set blocked = slot_busy or problems or exhausted %}
+{% set latest = busy.free_at_how and busy.free_at_how != 'about' %}
+{% set next_card = (faults | selectattr('id', 'equalto', next_id) | list | first) if next_id else None %}
 {% block title %}Try a rescue · Keyhold{% endblock %}
+{% block body_attrs %}data-page="try" data-busy="{{ '1' if (unlocked and (slot_busy or problems)) else '0' }}" data-runs-left="{{ runs_left }}"{% endblock %}
+{# A clock time: UTC from the server, shown in the visitor's own time by common.js (UTC stays in the title). #}
+{% macro clock(epoch) -%}
+<time class="clock" data-epoch="{{ epoch | int }}" title="{{ epoch | hms }} UTC">{{ (epoch | hms)[:5] }} UTC</time>
+{%- endmacro %}
+{# "in about 12 min", counted down by try.js from the server's number. #}
+{% macro in_about(seconds, within=False) -%}
+<span class="free-in" data-seconds="{{ seconds }}"{% if within %} data-within="1"{% endif %}>{% if seconds < 60 %}in under a minute{% elif within %}within {{ ((seconds + 59) // 60) | int }} min{% else %}in about {{ ((seconds + 59) // 60) | int }} min{% endif %}</span>
+{%- endmacro %}
+{% macro free_when() -%}
+{% if busy.free_at and free_in_s is not none %}Free {{ in_about(free_in_s, latest) }} ({% if latest %}by {{ clock(busy.free_at) }} at the latest{% else %}around {{ clock(busy.free_at) }}{% endif %}).{% endif %}
+{%- endmacro %}
+{% macro example_links(primary=False) -%}
+{% if examples.captured %}<a class="btn {{ 'btn-primary' if primary else 'btn-secondary' }}" href="{{ examples.captured }}">See a captured run {{ icon('i-arrow') }}</a>{% endif %}
+{% if examples.stopped %}<a class="btn btn-secondary" href="{{ examples.stopped }}">Stopped, $0</a>{% endif %}
+{% if examples.no_hold %}<a class="btn btn-secondary" href="{{ examples.no_hold }}">No hold</a>{% endif %}
+{%- endmacro %}
 {% block main %}
-<div class="page-head">
-  <h1>Try a rescue</h1>
-  <p class="lede">Pick a broken server. A fresh copy starts with that fault, the agent takes a free look, and you
-    see the quote and the evidence before anything is held.
-    {% if settings.simulated %}In this deployment the server is simulated, so a run takes about a minute.{% else %}The
-    VM boots in {{ boot_span }}.{% endif %}</p>
-</div>
+<section class="try-hero{% if cancelled %} after-cancel{% endif %}" aria-labelledby="try-h">
+  <p class="eyebrow">Try a rescue · {% if settings.simulated %}about {{ try_minutes }} minutes{% else %}about {{ try_minutes }} minutes, you act for about 2{% endif %}</p>
+  <h1 class="display" id="try-h">No hold, no keystrokes.<br><span class="soft">Only your server answering can charge&nbsp;you.</span></h1>
+  <div class="hero-row">
+    {# On a phone the lede keeps its first sentence: the headline already says the rest. #}
+    <p class="lede">An AI fixes a dead server through its console. <span class="more-words">It gets the keyboard only while a PayPal hold is live,
+      and you are charged only if your own check of the server passes.</span>
+      {% if settings.simulated %}<span class="desk-only">Here the server is simulated and {{ agent_name | lower }} types, so the three paths take about {{ try_minutes }} minutes in all.</span>{% else %}<span class="desk-only">The
+      VM boots in {{ boot_span }}, then Claude takes a free look.{% if warranty_wait_min %} After a charge, the warranty keeps the VM for about {{ warranty_wait_min }} minute{{ '' if warranty_wait_min == 1 else 's' }} before the next path.{% endif %}</span>{% endif %}</p>
+    <figure class="mini-story" aria-label="Every rescue follows the same five steps">
+      <figcaption class="eyebrow">Every rescue, five steps</figcaption>
+      <ol>
+        <li><span class="mn">{{ icon('i-quote') }}</span>Quote</li>
+        <li class="h"><span class="mn">{{ icon('i-hold') }}</span>Hold</li>
+        <li><span class="mn">{{ icon('i-key') }}</span>Keyboard</li>
+        <li><span class="mn">{{ icon('i-probe') }}</span>Probe</li>
+        <li class="c"><span class="mn">{{ icon('i-charged') }}</span>Charged</li>
+      </ol>
+    </figure>
+  </div>
+</section>
 
+{% if cancelled %}
+<div class="alert" role="status">{{ icon('i-info') }}<p><strong>Run cancelled. Nothing was held.</strong>
+  {% if not busy.mine_cancelling %}<span class="more-words">The server was released and nothing was charged.</span>{% endif %}</p></div>
+{% endif %}
 {% if error %}
-<div class="alert alert-warn" role="alert">{{ error }}</div>
+<div class="alert warn" role="alert">{{ icon('i-info') }}<p>{{ error }}</p></div>
 {% endif %}
 
-{% if my_run %}
-<div class="alert" role="status">You have a run in progress: <a href="/runs/{{ my_run.id }}">{{ my_run.fault_title }}</a>
-  ({{ my_run.stage_label | lower }}).</div>
+{% if my_run and not mine_waiting and not (cancelled and my_run.stop_requested) %}
+{% set in_warranty = my_run.stage == 'warranty' %}
+<section class="card resume" aria-labelledby="resume-h" id="resume">
+  <span class="resume-ic" aria-hidden="true">{{ icon('i-shield' if in_warranty else 'i-key') }}</span>
+  <div>
+    <p class="eyebrow">{{ 'Your earlier run' if in_warranty else 'Your run' }}</p>
+    <h2 class="h3" id="resume-h">{{ my_run.fault_title }}</h2>
+    <p class="fine">{% if my_run.stop_requested and my_run.stage in ['booting', 'looking'] %}Cancelled, releasing the server{% elif my_warranty %}{% if my_progress and my_progress.money %}{{ my_progress.money.label }} ${{ my_progress.money.amount }} · {% endif %}warranty check {{ my_warranty[0] }} of {{ my_warranty[1] }}{% elif my_progress %}{{ my_progress.status.text }}{% else %}{{ my_run.stage_label }}{% endif %}</p>
+  </div>
+  <a class="btn {{ 'btn-secondary' if (in_warranty or my_run.stop_requested) else 'btn-primary' }}" href="/runs/{{ my_run.id }}">{{ 'Watch your warranty' if in_warranty else 'Open your run' }} {{ icon('i-arrow') }}</a>
+</section>
 {% endif %}
 
 {% if not unlocked %}
-<section class="card narrow" aria-labelledby="pass-title">
-  <h2 id="pass-title" class="card-title">Passcode</h2>
+<section class="card pass-card" aria-labelledby="pass-title">
+  <h2 class="h3" id="pass-title">Passcode</h2>
   {% if passcode_set %}
-  <p>Runs use a real test VM and a paid model, so /try is behind a passcode. It is in the submission's testing
-    instructions.</p>
-  <form method="post" action="/try/unlock" class="stack">
+  <p class="mt-12">{% if paid_model %}Runs use a real test VM and a paid model{% else %}Runs share one test server{% endif %}, so /try is
+    behind a passcode. It is in the submission's testing instructions, together with a one-click judge link.</p>
+  <form method="post" action="/try/unlock" class="pass-form">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <label for="passcode">Passcode</label>
     <input id="passcode" name="passcode" type="password" autocomplete="off" required>
-    <button class="button button-primary" type="submit">Unlock</button>
+    <button class="btn btn-primary" type="submit">Unlock</button>
   </form>
+  {# Without the passcode, the finished runs are still open. #}
+  <p class="mt-12 fine">No passcode? Every earlier run is in the <a href="/judge">ledger</a>{% if examples.captured or examples.stopped or examples.no_hold %}, or open a finished one:{% else %}.{% endif %}</p>
+  {% if examples.captured or examples.stopped or examples.no_hold %}<p class="box-actions mt-12">{{ example_links() }}</p>{% endif %}
   {% else %}
-  <p>The operator has not set a passcode, so new runs are closed. The <a href="/judge">ledger</a> of earlier runs
+  <p class="mt-12">The operator has not set a passcode, so new runs are closed. The <a href="/judge">ledger</a> of earlier runs
     is open.</p>
   {% endif %}
 </section>
 {% else %}
 
-<ol class="steps" aria-label="How a test goes">
-  <li><strong>Pick a broken server</strong> below. A fresh copy boots with that fault, and Claude takes a free look:
-    screenshots only, no keys. You get a fixed price and the screen lines it is based on.</li>
-  <li><strong>Approve the hold</strong> with the PayPal button. It is the PayPal sandbox (test money);
-    {% if settings.judge_buyer_email %}the sandbox buyer login is shown right next to the button.{% else %}log in
-    with a sandbox buyer account.{% endif %}</li>
-  <li><strong>Watch.</strong> Claude gets the keyboard only while the hold is live. Your probe (an SSH login and the
-    web page) decides: pass twice and the hold is captured; Stop or a give-up voids it.</li>
-</ol>
+<div class="try-row">
+  <ol class="howto" aria-label="Three short demo paths">
+    {% for f in faults %}
+    <li{% if f.done and f.done.ok %} class="done"{% endif %}><span class="n" aria-hidden="true">{% if f.done and f.done.ok %}{{ icon('i-check') }}{% else %}{{ f.path }}{% endif %}</span><span class="txt"><span class="t">{{ f.outcome }}</span>{% if f.done and f.done.ok %}<span class="sr-only"> (done)</span>{% endif %} <span class="d">{{ f.time }}</span></span></li>
+    {% endfor %}
+  </ol>
+  <p class="capacity{% if slot_busy or exhausted %} busy{% endif %}" id="capacity"><span class="dot" aria-hidden="true"></span><span>
+    {%- if just_unlocked %}<strong class="unl">Unlocked</strong> · {% endif -%}
+    {%- if slots_total > 1 -%}
+      {% if slot_busy %}All {{ slots_total }} test servers in use{% else %}{{ slots_free }} of {{ slots_total }} test servers free{% endif %} · {{ runs_left }} of {{ runs_per_hour }} runs left this hour · One run per browser at a time.
+    {%- else -%}
+      Test server {{ 'in use' if slot_busy else 'free' }} · {{ runs_left }} of {{ runs_per_hour }} runs left this hour · One server at a time.
+    {%- endif -%}
+    {%- if paid_model %} · Model budget, last 24 h: ${{ spend_remaining }} left (cap ${{ spend_cap }}; a run that reaches its own budget is stopped and voided).{% endif -%}
+  </span></p>
+</div>
+{% if just_unlocked %}<p class="sr-only" role="status">Unlocked for this browser. Start with the card marked {{ 'Start here' if next_card and next_card.path == 1 else 'Next' }}.</p>{% endif %}
+<p class="sr-only" id="try-live" role="status" aria-live="polite"></p>
 
-<section class="status-row" aria-label="Capacity">
-  <div class="stat">
-    <span class="stat-label">{% if slots_total > 1 %}Test servers{% else %}Test server{% endif %}</span>
-    <span class="stat-value">{% if slot_busy %}<span class="pill pill-held">busy</span>{% elif slots_total > 1 %}<span class="pill pill-captured">{{ slots_free }} of {{ slots_total }} free</span>{% else %}<span class="pill pill-captured">free</span>{% endif %}</span>
-    {% if slot_busy %}<span class="stat-note">{{ slot_message }}</span>{% elif slots_total > 1 %}<span class="stat-note">One run per browser at a time.</span>{% else %}<span class="stat-note">One server at a time.</span>{% endif %}
-  </div>
-  <div class="stat">
-    <span class="stat-label">Runs left this hour</span>
-    <span class="stat-value">{{ runs_left }} of {{ runs_per_hour }}</span>
-    <span class="stat-note">Per address.</span>
-  </div>
-  {% if paid_model %}
-  <div class="stat">
-    <span class="stat-label">Model budget, last 24 h</span>
-    <span class="stat-value">${{ spend_remaining }} left</span>
-    <span class="stat-note">Cap ${{ spend_cap }}. A run that reaches its own budget is stopped and voided.</span>
-  </div>
-  {% endif %}
-</section>
+{# Every path done: the ledger is the next step, and the boxes below keep their buttons secondary. #}
+{% if all_done %}
+<div class="busy-box done-box" id="done-box">
+  <div><p><strong>All three paths done.</strong> Each run's page reads PayPal live, and the ledger lists them all.</p></div>
+  <p class="box-actions"><a class="btn btn-primary" href="/judge">See all runs in the ledger {{ icon('i-arrow') }}</a></p>
+</div>
+{% endif %}
+{% set box_primary = not all_done and not exhausted %}
 
-{% if problems %}
-<div class="alert alert-warn" role="alert">
-  <p><strong>The test server is not ready.</strong></p>
-  <ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
+{% if exhausted %}
+<div class="busy-box" id="runs-box" role="status">
+  <div>
+    <p>This address has started {{ runs_per_hour }} runs in the last hour, the most it gets.{% if next_run_at and next_run_in_s is not none %} Next run {{ in_about(next_run_in_s) }} (around {{ clock(next_run_at) }}).{% endif %}</p>
+    {% if not all_done and (examples.captured or examples.stopped or examples.no_hold) %}<p class="fine">Meanwhile, see a finished one.</p>{% endif %}
+  </div>
+  {% if not all_done %}<p class="box-actions">{{ example_links(primary=True) }}</p>{% endif %}
 </div>
 {% endif %}
 
-<section aria-labelledby="faults-title">
-  <h2 id="faults-title" class="section-title">Pick a fault</h2>
-  <div class="fault-grid">
-    {% for f in faults %}
-    <form method="post" action="/try/start" class="card fault-card">
+{% if mine_waiting %}
+<div class="busy-box" id="busy-box" role="status">
+  <div>
+    {% if busy.mine_cancelling %}
+    <p>Your cancelled run still holds the test server until its boot ends. Nothing is held.</p>
+    {% else %}
+    <p>Your rescue's warranty is using the test server{% if busy.warranty_total %} (check {{ busy.warranty_done }} of {{ busy.warranty_total }}){% endif %}. {{ free_when() }}</p>
+    {% endif %}
+    {% if not exhausted %}<p class="fine">The buttons turn on by themselves.</p>{% endif %}
+  </div>
+  {% if busy.watch_url and not busy.mine_cancelling %}<a class="btn {{ 'btn-primary' if box_primary else 'btn-secondary' }}" href="{{ busy.watch_url }}">Watch your warranty {{ icon('i-arrow') }}</a>{% endif %}
+</div>
+{% elif slot_busy and not busy.mine %}
+<div class="busy-box" id="busy-box" role="status">
+  <div>
+    <p>{{ busy.message }}</p>
+    <p class="fine">{% if busy.watch_title %}Now running: {{ busy.watch_title }}.{% endif %} {{ free_when() }}{% if not exhausted %} The buttons come back on their own.{% endif %}</p>
+  </div>
+  <p class="box-actions">
+    {% if busy.watch_url %}<a class="btn {{ 'btn-primary' if box_primary else 'btn-secondary' }}" href="{{ busy.watch_url }}">Watch it live {{ icon('i-arrow') }}</a>{% endif %}
+    {% if not exhausted and not all_done %}{{ example_links(primary=not busy.watch_url) }}{% endif %}
+  </p>
+</div>
+{% endif %}
+
+{% if problems %}
+<div class="alert warn" role="alert">{{ icon('i-info') }}<div>
+  <p><strong>The test server is not ready.</strong></p>
+  <ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
+</div></div>
+{% endif %}
+
+{# One card is marked: "Start here" (path 1) or "Next", the first path this browser has not done. A
+   disabled button is never the page's primary: the busy box or the run box carries that. #}
+<div class="faults" role="group" aria-label="Pick a fault">
+  {% for f in faults %}
+  {% set is_next = f.id == next_id %}
+  {% set done_ok = f.done and f.done.ok %}
+  <article class="card fault{% if is_next %} start{% if blocked %} blocked{% endif %}{% endif %}{% if done_ok %} done{% endif %}" id="fault-{{ f.id }}" aria-labelledby="f-{{ f.id }}">
+    {% if is_next %}<span class="ribbon">{{ 'Start here' if f.path == 1 else 'Next' }}</span>{% elif done_ok %}<span class="ribbon done">{{ icon('i-check') }}Done · {{ f.done.label }}</span>{% endif %}
+    <div class="fault-top">
+      <span class="fault-ill" aria-hidden="true">{{ icon(f.icon) }}</span>
+      <div><p class="path">Path {{ f.path }} · {{ f.time }}</p><span class="chip" title="Fault class {{ f.fault_class }}{% if f.tier %}, tier {{ f.tier }}{% endif %}">{{ f.chip }}</span></div>
+    </div>
+    <h2 class="h3" id="f-{{ f.id }}">{{ f.title }}</h2>
+    <p class="blurb">{{ f.short_blurb }}</p>
+    <form method="post" action="/try/start" class="fault-form">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="fault" value="{{ f.id }}">
-      <h3>{{ f.title }}</h3>
-      <p>{{ f.blurb }}</p>
-      <dl class="kv">
-        <dt>Fault class</dt><dd><code>{{ f.fault_class }}</code></dd>
-        <dt>Expected price</dt>
-        <dd>{% if f.price %}{{ f.tier }}, ${{ f.price }} held, captured only if the probe passes{% else %}None. The honest answer is no hold.{% endif %}</dd>
-      </dl>
-      <label class="field-label" for="note-{{ f.id }}">What did you see? <span class="muted">(optional)</span></label>
-      <input type="text" id="note-{{ f.id }}" name="note" maxlength="300" autocomplete="off"
-             placeholder="{{ f.note_hint }}">
-      <button class="button {% if loop.first %}button-primary{% endif %}" type="submit" {% if slot_busy or problems %}disabled{% endif %}>Break this server</button>
+      <button class="btn {% if is_next and not blocked %}btn-primary{% else %}btn-secondary{% endif %} btn-block" type="submit"
+        {% if blocked %}disabled{% endif %}{% if exhausted %} data-block="runs"{% endif %} data-primary="{{ '1' if is_next else '0' }}"><span>{% if done_ok %}Run it again{% else %}Break this server{% endif %}<span class="sr-only">: {{ f.title }}</span></span>{% if is_next %} {{ icon('i-arrow') }}{% endif %}</button>
+      {% if exhausted %}
+      <p class="fine wait-reason">{% if next_run_in_s is not none %}Next run {{ in_about(next_run_in_s) }}.{% else %}No runs left this hour.{% endif %}</p>
+      {% elif slot_busy %}
+      <p class="fine wait-reason">{% if busy.mine_cancelling %}Opens when the cancelled boot ends.{% elif busy.free_at and free_in_s is not none %}Opens {{ in_about(free_in_s, latest) }}.{% elif busy.mine %}Opens when your run ends.{% else %}Opens when the current run ends.{% endif %}</p>
+      <p class="fine free-reason" hidden>{{ f.fine }}</p>
+      {% else %}
+      <p class="fine">{{ f.fine }}</p>
+      {% endif %}
+      {% if f.done %}<p class="fine done-note">Your last run: <a href="{{ f.done.href }}">{{ f.done.label }}</a></p>{% endif %}
+      <details>
+        <summary>{{ icon('i-chev') }}<span>Add what you saw<span class="sr-only"> before breaking {{ f.title }}</span> (optional)</span></summary>
+        <label for="note-{{ f.id }}">What did you see? The agent reads it as data, not as instructions.</label>
+        <input type="text" id="note-{{ f.id }}" name="note" maxlength="300" autocomplete="off" placeholder="{{ f.note_hint }}">
+      </details>
     </form>
-    {% endfor %}
-  </div>
-</section>
+  </article>
+  {% endfor %}
+</div>
+
+{% if not exhausted and not (slot_busy and not busy.mine) and (examples.captured or examples.stopped or examples.no_hold) %}
+<p class="short">Short on time? See a finished one:
+  {% if examples.captured %}<a href="{{ examples.captured }}">Captured ›</a>{% endif %}
+  {% if examples.stopped %}<a href="{{ examples.stopped }}">Stopped, $0 ›</a>{% endif %}
+  {% if examples.no_hold %}<a href="{{ examples.no_hold }}">No hold ›</a>{% endif %}
+</p>
+{% endif %}
 {% endif %}
 {% endblock %}
+{% block scripts %}<script src="/static/try.js"></script>{% endblock %}

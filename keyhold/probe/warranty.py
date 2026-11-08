@@ -31,6 +31,10 @@ from ._timing import ProbeFn, ResultFn, StopFn, call_probe, notify, passed, slee
 DUE_TOLERANCE_S = 1e-3
 
 
+STANDARD_CHECKS = 24
+STANDARD_INTERVAL_S = 3600.0
+
+
 def _span(seconds: float) -> str:
     """Plain duration: '1 hour', '24 hours', '1 minute', '90 seconds'."""
     for unit, size in (("hour", 3600), ("minute", 60), ("second", 1)):
@@ -38,6 +42,24 @@ def _span(seconds: float) -> str:
             n = int(seconds // size)
             return f"{n} {unit}" + ("" if n == 1 else "s")
     return f"{seconds:g} seconds"
+
+
+_SHORT_UNITS = {"hours": "h", "hour": "h", "minutes": "min", "minute": "min", "seconds": "s", "second": "s"}
+
+
+def _every(seconds: float, *, short: bool = False) -> str:
+    """The interval after 'every': 'hour', 'minute', '20 seconds' (short: 'hour', '20 s')."""
+    span = _span(seconds)
+    if span.startswith("1 "):
+        return span[2:]
+    if not short:
+        return span
+    number, unit = span.split(" ", 1)
+    return f"{number} {_SHORT_UNITS.get(unit, unit)}"
+
+
+def _times(n: int) -> str:
+    return {1: "once", 2: "twice"}.get(n, f"{n} times")
 
 
 @dataclass(frozen=True)
@@ -70,20 +92,64 @@ class WarrantyPlan:
         return started_at + slot * self.interval_s
 
     @property
+    def is_standard(self) -> bool:
+        """True for the plan the product promises: 24 hourly checks."""
+        return self.checks == STANDARD_CHECKS and self.interval_s == STANDARD_INTERVAL_S
+
+    @property
+    def is_hour_per_minute(self) -> bool:
+        """True for the default judge plan, where each minute stands in for an hour."""
+        return self.checks == STANDARD_CHECKS and self.interval_s == 60.0
+
+    @property
+    def is_compressed(self) -> bool:
+        """True when the plan covers less time than the standard 24 hours. Only such a plan is
+        called "compressed", in judge mode or not; a sparser plan over 24 hours or more is not."""
+        return self.window_s < STANDARD_CHECKS * STANDARD_INTERVAL_S
+
+    @property
     def label(self) -> str:
-        every = _span(self.interval_s)
-        every = every[2:] if every.startswith("1 ") else every
+        """One sentence for logs and the audit details. It reads correctly for any interval and
+        count: the standard plan is never called compressed (judge mode or not), and only a plan
+        shorter than 24 hours is."""
+        every = _every(self.interval_s)
         rule = (
             "Two failed checks in a row refund the full capture."
             if self.failures_to_refund == 2
             else f"{self.failures_to_refund} failed checks in a row refund the full capture."
         )
-        if self.judge_mode:
+        if self.is_standard:
+            return f"Warranty: re-probed every {every} for {_span(self.window_s)}. {rule}"
+        if self.is_compressed and self.judge_mode and self.is_hour_per_minute:
             return (
                 f"Warranty (judge mode, compressed): re-probed every {every} for {_span(self.window_s)}; "
                 f"each {every} stands in for an hour. {rule}"
             )
-        return f"Warranty: re-probed every {every} for {_span(self.window_s)}. {rule}"
+        if self.is_compressed and self.judge_mode:
+            return (
+                f"Warranty (judge mode, compressed): re-probed every {every}, {_times(self.checks)} "
+                f"({_span(self.window_s)} in all); the real plan is 24 hourly checks. {rule}"
+            )
+        if self.is_compressed:
+            return (
+                f"Warranty: re-probed every {every}, {_times(self.checks)} ({_span(self.window_s)} in all), "
+                f"shorter than the standard 24 hourly checks. {rule}"
+            )
+        return f"Warranty: re-probed every {every}, {_times(self.checks)} ({_span(self.window_s)} in all). {rule}"
+
+    @property
+    def short_label(self) -> str:
+        """The plan in a few words for the pages, e.g. "re-checked every 20 s, 6 times (compressed
+        for the demo; the real plan is 24 hourly checks)". Same rules as ``label``."""
+        every = _every(self.interval_s, short=True)
+        base = f"re-checked every {every}, {_times(self.checks)}"
+        if self.is_standard or not self.is_compressed:
+            return base
+        if self.judge_mode and self.is_hour_per_minute:
+            return f"{base} (compressed for the demo: each minute stands in for an hour)"
+        if self.judge_mode:
+            return f"{base} (compressed for the demo; the real plan is 24 hourly checks)"
+        return f"{base} (shorter than the standard 24 hourly checks)"
 
 
 class WarrantyVerdict(str, enum.Enum):

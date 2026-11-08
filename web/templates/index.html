@@ -1,76 +1,77 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon %}
 {% block title %}Keyhold{% endblock %}
+{% block body_attrs %}data-page="home"{% endblock %}
 {% block main %}
 <section class="hero" aria-labelledby="hero-title">
-  <p class="eyebrow">Server console rescue under a PayPal lock</p>
-  <h1 id="hero-title">No hold, no keystrokes.<br>Only your server answering can charge you.</h1>
+  <p class="eyebrow"><span class="wide-only">Server console rescue under a PayPal lock</span><span class="narrow-only">Console rescue · PayPal lock</span></p>
+  <h1 class="display" id="hero-title">No hold, no keystrokes.<br><span class="soft">Only your server answering can charge&nbsp;you.</span></h1>
   <p class="lede">When a Linux server stops answering SSH, the last way in is the hosting provider's web console: a
     screen and a keyboard. Keyhold lends that keyboard to an AI agent. A PayPal authorization is the lock on it, and
     only your own check of the server can turn the hold into a charge.</p>
   <p class="actions">
-    <a class="button button-primary" href="/try">Try a rescue</a>
-    <a class="button" href="/judge">Open the ledger</a>
+    <a class="btn btn-primary" href="/try">Try a rescue (about {{ try_minutes }} minutes) {{ icon('i-arrow') }}</a>
+    <a class="btn btn-secondary" href="/judge">Open the ledger</a>
   </p>
 </section>
 
 <section aria-labelledby="flow-title">
-  <h2 id="flow-title" class="section-title">How a rescue runs</h2>
+  <h2 id="flow-title" class="h2 section-title">How a rescue runs</h2>
   <ol class="flow">
-    <li class="flow-step">
-      <span class="flow-n" aria-hidden="true">1</span>
-      <h3>Free look</h3>
+    <li class="card flow-step">
+      <span class="flow-n" aria-hidden="true">{{ icon('i-quote') }}</span>
+      <h3 class="h3">Free look</h3>
       <p>The agent sees screenshots and cannot press a key. You get the fault, the screen lines that show it and a
         fixed price: $9 for one config fix, $19 for a boot-path repair, $29 for kernel, initramfs or disk.</p>
     </li>
-    <li class="flow-step">
-      <span class="flow-n" aria-hidden="true">2</span>
-      <h3>Your probe, fixed at checkout</h3>
+    <li class="card flow-step">
+      <span class="flow-n" aria-hidden="true">{{ icon('i-seal') }}</span>
+      <h3 class="h3">Your probe, fixed at checkout</h3>
       <p>An SSH login with a key only the probe holds, and a page that must answer with the content you expect.
         Its hash goes into the PayPal order.</p>
     </li>
-    <li class="flow-step">
-      <span class="flow-n" aria-hidden="true">3</span>
-      <h3>Hold</h3>
+    <li class="card flow-step h">
+      <span class="flow-n" aria-hidden="true">{{ icon('i-hold') }}</span>
+      <h3 class="h3">Hold</h3>
       <p>You approve a PayPal one-time payment. Keyhold creates the order with intent AUTHORIZE for the quote and
         authorizes it. Nothing is captured.</p>
     </li>
-    <li class="flow-step">
-      <span class="flow-n" aria-hidden="true">4</span>
-      <h3>The lock</h3>
-      <p>Every keystroke passes a gate that asks PayPal whether the authorization is still CREATED. Press Stop and
-        the hold is voided and the keyboard is gone.</p>
+    <li class="card flow-step">
+      <span class="flow-n" aria-hidden="true">{{ icon('i-unlock') }}</span>
+      <h3 class="h3">The lock</h3>
+      <p>Every keystroke is checked against PayPal's latest answer, which is re-read every 5 actions or 15 seconds.
+        If the answer is anything but CREATED, Stop, or doubt, the keyboard is gone.</p>
     </li>
-    <li class="flow-step">
-      <span class="flow-n" aria-hidden="true">5</span>
-      <h3>Capture on your probe only</h3>
+    <li class="card flow-step c">
+      <span class="flow-n" aria-hidden="true">{{ icon('i-charged') }}</span>
+      <h3 class="h3">Capture on your probe only</h3>
       <p>Two passing probes, far enough apart, with no failure between. Then a capture of the quote or less. The
         agent has no tool that can charge you.</p>
     </li>
-    <li class="flow-step">
-      <span class="flow-n" aria-hidden="true">6</span>
-      <h3>Void, or refund later</h3>
+    <li class="card flow-step">
+      <span class="flow-n" aria-hidden="true">{{ icon('i-voided') }}</span>
+      <h3 class="h3">Void, or refund later</h3>
       <p>Giving up, a time limit, Stop, or a probe that never passes voids the hold. If the server falls over twice
         in a row during the warranty, the capture is refunded in full.</p>
     </li>
   </ol>
 </section>
 
-<section class="cols" aria-label="Details">
+<section class="two" aria-label="Details">
   <div class="card">
-    <h2 class="card-title">The three faults on /try</h2>
+    <h2 class="h3">The three faults on /try</h2>
     <ul class="plain-list">
       {% for f in faults %}
       <li>
-        <strong>{{ f.title }}</strong>
-        {% if f.price %}<span class="pill pill-neutral">{{ f.tier }} · ${{ f.price }}</span>{% else %}<span class="pill pill-voided">no price</span>{% endif %}
-        <br><span class="muted">{{ f.blurb }}</span>
+        <strong>{{ f.title }}</strong> <span class="chip">{{ f.chip }}</span>
+        <span class="muted">{{ f.blurb }}</span>
       </li>
       {% endfor %}
     </ul>
   </div>
   <div class="card">
-    <h2 class="card-title">PayPal pieces in one rescue</h2>
-    <ul class="plain-list compact">
+    <h2 class="h3">PayPal pieces in one rescue</h2>
+    <ul class="plain-list">
       <li>JS SDK v6: a client token, <code>findEligibleMethods</code>, a PayPal one-time payment session.</li>
       <li>Orders v2: create with intent AUTHORIZE, then authorize.</li>
       <li>Payments v2: GET authorization for the lock, capture with <code>final_capture</code>, void, refund.</li>

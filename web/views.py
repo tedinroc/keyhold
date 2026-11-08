@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit
 
-from keyhold.faults import FAULT_CLASSES
+from keyhold.faults import FAULT_CLASSES, FAULTS, TRY_FAULTS
 from keyhold.pay.ledger import (
     EventRecord,
     Ledger,
@@ -31,8 +31,12 @@ from keyhold.pay.ledger import (
 from keyhold.probe.spec import ProbeSpecError, parse_public_key
 from keyhold.types import NO_MONEY_CAPTURE, MoneyOp, OutboxStatus, PayPalError, RescueState
 
+from .story import key_moments, paypal_table, progress_view, short_id, state_words, tale_view
+
 __all__ = [
     "PayPalView",
+    "fault_title_for",
+    "thumb_crop",
     "fmt_time",
     "judge_view",
     "money_view",
@@ -55,6 +59,21 @@ def fmt_time(epoch: float | None) -> str | None:
 
 def _money(value: Decimal | str | None) -> str | None:
     return None if value is None else f"{Decimal(str(value)):.2f}"
+
+
+def fault_title_for(fault_class: str | None) -> str:
+    """The /try title for a fault class ("Typo in sshd_config"), so a rescue keeps its name after
+    a restart, when its run is gone from memory. Falls back to the class description."""
+    if not fault_class:
+        return "Rescue"
+    for fault_id in TRY_FAULTS:
+        if FAULTS[fault_id].fault_class == fault_class:
+            return FAULTS[fault_id].title
+    for fault in FAULTS.values():
+        if fault.fault_class == fault_class:
+            return fault.title
+    klass = FAULT_CLASSES.get(fault_class)
+    return klass.description[0].upper() + klass.description[1:] if klass else fault_class
 
 
 # --------------------------------------------------------------------------------------------
@@ -439,6 +458,11 @@ def timeline_entry(event: EventRecord) -> dict[str, Any] | None:
         text = f"diagnosis: {event.detail}"
     elif kind == "gate_revoked":
         text = f"keyboard locked: {event.detail}"
+    plain = None
+    if kind == "state":
+        before, after = str(data.get("from", "")), str(data.get("to", ""))
+        reason = str(data.get("reason") or "")
+        plain = f"{state_words(before)} \u2192 {state_words(after)}" + (f": {reason}" if reason else "")
     tone = "warn" if kind in _WARN or (kind in ("probe", "warranty_check") and not data.get("ok")) else ""
     if kind == "gate_revoked" and event.detail.startswith(_NORMAL_LOCK):
         tone = ""
@@ -457,6 +481,7 @@ def timeline_entry(event: EventRecord) -> dict[str, Any] | None:
         "text": text[:1500],
         "tone": tone,
         "muted": kind == "agent_note",
+        "plain": plain,
     }
 
 
@@ -500,7 +525,9 @@ def spend_for(ledger: Ledger, rescue_id: str) -> str | None:
 # --------------------------------------------------------------------------------------------
 
 
-def run_view(run: Any, thumbs: Iterable[Any]) -> dict[str, Any]:
+def run_view(run: Any, thumbs: Iterable[Any], *, tight: bool = False) -> dict[str, Any]:
+    """``tight``: the page's console no longer changes (a quote, no hold, an ended run), so its
+    crop hugs the text instead of keeping the live pages' steady 10:3 band."""
     look = run.look
     return {
         "id": run.id,
@@ -520,11 +547,11 @@ def run_view(run: Any, thumbs: Iterable[Any]) -> dict[str, Any]:
         "no_quote_reason": look.reason if look is not None and look.quote is None else None,
         "fault_class": look.fault_class if look is not None else None,
         "quote_deadline": fmt_time(run.quote_deadline),
-        "thumbs": [thumb_view(run.id, t) for t in thumbs],
+        "thumbs": [thumb_view(run.id, t, tight=tight) for t in thumbs],
     }
 
 
-def thumb_view(run_id: str, thumb: Any) -> dict[str, Any]:
+def thumb_view(run_id: str, thumb: Any, *, tight: bool = False) -> dict[str, Any]:
     return {
         "n": thumb.n,
         "url": f"/runs/{run_id}/thumbs/{thumb.n}.png",
@@ -532,7 +559,42 @@ def thumb_view(run_id: str, thumb: Any) -> dict[str, Any]:
         "label": thumb.label,
         "width": thumb.width,
         "height": thumb.height,
+        "crop": thumb_crop(thumb.width, thumb.height, getattr(thumb, "box", None), tight=tight),
     }
+
+
+def thumb_crop(width: int, height: int, box: Any, *, tight: bool = False) -> dict[str, int] | None:
+    """How the pages crop a console screenshot to its text, so the lines that matter are larger
+    without blowing a small screen up until it blurs.
+
+    Desktop (x, y, w, h): from the left margin (console text starts there) to the end of the
+    longest line, so no line is cut, and at least three quarters of the width; from the first text
+    line to the last, and at least a 10:3 band, so a one-line screen keeps some of its height and a
+    live console does not jump. ``tight`` (a console that no longer changes, often in a narrower
+    column): half to 70% of the width (about 56 columns of an 80-column console, so the text stays
+    readable) and a 20:3 band, so one or two lines are not lost in black; ``dcut`` is 1 when a line
+    runs past it. Phone (px, pw, py, ph): the last lines in a narrower band, 40 to 45% of the width
+    (about 35 columns), so a phone shows them near their stored size; ``cut`` is 1 when a line runs
+    past it. A cut edge fades on the page, and the full screen is one tap away. None: the whole
+    screen."""
+    if not box or width <= 0 or height <= 0:
+        return None
+    x0, y0, x1, y1 = (int(v) for v in box)
+    if tight:
+        w = min(width, max(round(width * 0.5), min(x1, round(width * 0.7))))
+    else:
+        w = min(width, max(round(width * 0.75), x1))
+    band = min(height, round(w * (0.15 if tight else 0.3)))
+    y1 = max(y1, y0 + band)
+    if y1 > height:
+        y0, y1 = max(0, height - band), height
+    h = y1 - y0
+    if w <= 0 or h <= 0:
+        return None
+    pw = min(max(x1, round(width * 0.4)), round(width * 0.45))
+    ph = min(h, max(round(pw * 0.6), 1))
+    return {"x": 0, "y": y0, "w": w, "h": h, "px": 0, "pw": pw, "py": y1 - ph, "ph": ph, "iw": width, "ih": height,
+            "cut": int(x1 > pw), "dcut": int(x1 > w)}
 
 
 def rescue_snapshot(
@@ -544,8 +606,16 @@ def rescue_snapshot(
     thumbs: Iterable[Any] = (),
     thumbs_run_id: str | None = None,
     policy_label: str = "",
+    plan: Any = None,
+    agent: str = "The agent",
+    source: str = "FakePayPal",
+    owner: bool = True,
+    webhooks_verifiable: bool = True,
 ) -> dict[str, Any]:
+    """Everything the rescue page shows. ``owner``: the viewer started the run, so the words say
+    "you"; anyone else reads "the owner" (rescue pages are public)."""
     events = ledger.events(rec.id)
+    final = rec.state.terminal and not (run is not None and run.active)
     entries = [e for e in (timeline_entry(ev) for ev in events) if e is not None]
     deliveries = rescue_deliveries(ledger, rec.id)
     timeline = sorted(
@@ -557,16 +627,23 @@ def rescue_snapshot(
     last_event = events[-1].id if events else 0
     last_delivery = max((d.id for d in deliveries), default=0)
     quote = quote_view(rec.quote, run.look.title if run is not None and run.look is not None else None)
+    title = run.fault_title if run is not None else fault_title_for(rec.quote.get("fault_class"))
+    ticks = ticks_view(rec, ledger.ops(rec.id))
+    progress = progress_view(rec, events, live=live, plan=plan, agent=agent, owner=owner)
+    warranty_total = (progress.get("warranty") or {}).get("total")
+    moments, _ = key_moments(timeline, {str(ev.id): ev.data for ev in events}, warranty_total=warranty_total,
+                             owner=owner)
     return {
         "rescue": _record_view(rec),
         "money": money_view(rec, live),
         "paypal": live,
         "quote": quote,
         "probe": probe_view(rec.probe_spec, rec.probe_spec_hash),
-        "ticks": ticks_view(rec, ledger.ops(rec.id)),
+        "ticks": ticks,
         "timeline": timeline,
         "cursor": {"event": last_event, "delivery": last_delivery},
-        "thumbs": [thumb_view(thumbs_run_id, t) for t in thumbs] if thumbs_run_id else [],
+        # A final page's console no longer changes: its crop hugs the text.
+        "thumbs": [thumb_view(thumbs_run_id, t, tight=final) for t in thumbs] if thumbs_run_id else [],
         "run": None
         if run is None
         else {
@@ -582,10 +659,22 @@ def rescue_snapshot(
         "model_spend": spend_for(ledger, rec.id),
         "policy": policy_label,
         "live_state": rec.state in LIVE_STATES or rec.state in (RescueState.HOLD_PENDING, RescueState.CAPTURED),
+        # Story-first views (only added; the fields above keep their meaning).
+        "title": title,
+        "progress": progress,
+        "paypal_table": paypal_table(rec, live, ticks, source=source, owner=owner,
+                                     webhooks_verifiable=webhooks_verifiable),
+        "moments": moments,
+        "tale": tale_view(rec, events, title=quote["title"], agent=agent, plan=plan, owner=owner),
     }
 
 
-def judge_view(ledger: Ledger, *, runs_by_rescue: dict[str, Any] | None = None) -> dict[str, Any]:
+def judge_view(
+    ledger: Ledger,
+    *,
+    runs_by_rescue: dict[str, Any] | None = None,
+    no_hold: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     rescues = list(reversed(ledger.rescues()))
     runs_by_rescue = runs_by_rescue or {}
     rows = []
@@ -603,9 +692,24 @@ def judge_view(ledger: Ledger, *, runs_by_rescue: dict[str, Any] | None = None) 
         problems = ledger.check_invariants(rec.id)
         problems_total += len(problems)
         run = runs_by_rescue.get(rec.id)
+        ticks = ticks_view(rec, ledger.ops(rec.id))
+        # The ledger is public: its notes say "the owner", never "you".
+        outcome = progress_view(rec, ledger.events(rec.id), owner=False)["outcome"]
+        net = None
+        if rec.captured_amount is not None:
+            net = f"{max(Decimal(0), rec.captured_amount - (rec.refunded_amount or Decimal(0))):.2f}"
         rows.append(
             {
                 **_record_view(rec),
+                "net_charged": net,
+                "title": run.fault_title if run is not None else fault_title_for(rec.quote.get("fault_class")),
+                "short_id": short_id(rec.id),
+                "outcome": outcome,
+                "api_ticks": {"done": sum(1 for t in ticks if t["api_at"]), "of": len(ticks)},
+                "webhook_ticks": {
+                    "done": sum(1 for t in ticks if t["webhook"] and t["webhook_at"]),
+                    "of": sum(1 for t in ticks if t["webhook"] and t["api_at"]),
+                },
                 "fault_class": rec.quote.get("fault_class"),
                 "tier": rec.quote.get("tier"),
                 "ticks": {
@@ -622,8 +726,34 @@ def judge_view(ledger: Ledger, *, runs_by_rescue: dict[str, Any] | None = None) 
         )
     outcomes = ledger.delivery_counts()
     pending = ledger.pending_ops()
+    no_hold = list(no_hold or [])
+    # One line under the heading: "3 runs: 1 charged, 1 stopped, 1 no hold".
+    kinds: dict[str, int] = {}
+    for row in rows:
+        state = row["outcome"]["state"]
+        if state in ("charged", "capture_pending"):
+            kind = "charged"
+        elif state in ("refunded", "refunding"):
+            kind = "refunded"
+        elif state == "voided" and row.get("end_reason") == "the owner pressed Stop":
+            kind = "stopped"
+        elif state == "voided":
+            kind = "voided"
+        elif state == "pending":
+            kind = "running"
+        else:  # ended before a hold: cancelled, expired, or PayPal did not confirm it
+            kind = {"cancelled": "cancelled", "expired": "expired"}.get(state, "not held")
+        kinds[kind] = kinds.get(kind, 0) + 1
+    if no_hold:
+        kinds["no hold"] = len(no_hold)
+    order = ["running", "charged", "refunded", "stopped", "voided", "cancelled", "expired", "not held", "no hold"]
+    total = len(rows) + len(no_hold)
+    summary = f"{total} run{'' if total == 1 else 's'}: " + ", ".join(f"{kinds[k]} {k}" for k in order if k in kinds) \
+        if total else ""
     return {
         "rows": rows,
+        "no_hold": no_hold,
+        "summary": summary,
         "count": len(rows),
         "states": states,
         "totals": {k: f"{v:.2f}" for k, v in totals.items()},

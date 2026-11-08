@@ -33,6 +33,8 @@ KEYHOLD_QUOTE_TTL_S                time to check out before the VM is released (
 KEYHOLD_MODEL_SPEND_CAP_USD        model spend allowed per rolling 24 hours (default 10)
 KEYHOLD_RUN_BUDGET_USD             model spend allowed per run (default 3)
 KEYHOLD_TRY_RUNS_PER_HOUR          runs one IP address may start per hour (default 4)
+KEYHOLD_SIM_STOP_PATH_TURN_S       simulated world: seconds the recorded agent pauses before each action on
+                                   the Stop path (fstab), so a judge has time to press Stop (default 3; 0: none)
 KEYHOLD_TRUST_PROXY                ``1``: the client address is the last X-Forwarded-For entry
 KEYHOLD_VM_HOME                    VM images and runs (default ``var/vm``)
 KEYHOLD_RUNNER_IMAGE               QEMU runner image (default ``keyhold-qemu-runner:3``)
@@ -98,6 +100,20 @@ def _float(env: Mapping[str, str], name: str, default: float | None) -> float | 
     return value
 
 
+def _seconds(env: Mapping[str, str], name: str, default: float) -> float:
+    """A duration that may be zero (zero turns the pause off)."""
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SettingsError(f"{name} must be a number") from None
+    if not 0 <= value <= 60:
+        raise SettingsError(f"{name} must be between 0 and 60")
+    return value
+
+
 def _money(env: Mapping[str, str], name: str, default: str) -> Decimal:
     raw = env.get(name, "").strip() or default
     try:
@@ -155,6 +171,7 @@ class Settings:
     max_unverified_deliveries: int = 500  # stored but unverified bodies before intake answers 503
     sse_streams_per_minute: int = 30  # status streams one address may open per minute
     capture_wait_s: float = 120.0  # how long a run keeps replaying a capture PayPal has not answered
+    sim_stop_path_turn_s: float = 0.0  # simulated fstab agent pause per action (from_env: 3 s)
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -282,6 +299,7 @@ class Settings:
             "run_budget_usd": _money(env, "KEYHOLD_RUN_BUDGET_USD", "3.00"),
             "runs_per_hour": _int(env, "KEYHOLD_TRY_RUNS_PER_HOUR", 4),
             "try_slots": _int(env, "KEYHOLD_TRY_SLOTS", 1),
+            "sim_stop_path_turn_s": _seconds(env, "KEYHOLD_SIM_STOP_PATH_TURN_S", 3.0),
             "judge_buyer_email": env.get("KEYHOLD_JUDGE_BUYER_EMAIL", "").strip(),
             "judge_buyer_password": env.get("KEYHOLD_JUDGE_BUYER_PASSWORD", "").strip(),
             "trust_proxy": _flag(env.get("KEYHOLD_TRUST_PROXY"), False),

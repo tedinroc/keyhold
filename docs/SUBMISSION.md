@@ -9,7 +9,7 @@ from the deployment, the uploaded film and the public repository. Do not estimat
 | [HOSTED URL], [VIDEO URL], [REPO URL] | the deployment, the uploaded film, the public repository |
 
 The live-run figures come from [docs/evidence/](evidence/README.md). Test counts below are from
-`uv run pytest -q` on 2026-11-08: 1058 collected, 1055 passed, 3 skipped
+`uv run pytest -q` on 2026-11-08: 1156 collected, 1153 passed, 3 skipped
 (they boot real guests). `tests/test_doc_counts.py` fails while these counts, or the ones in the
 README and the judge guide, differ from the suite's.
 
@@ -114,7 +114,7 @@ keystroke firewall refuses destructive commands before they reach the console.
 
 ## Accomplishments that we're proud of
 
-- 1058 tests: 1055 pass, and 3 boot real guests on demand. None reach the network. A stateful
+- 1156 tests: 1153 pass, and 3 boot real guests on demand. None reach the network. A stateful
   property test drives rescues through random PayPal errors, lost answers, crashes, expiry and
   out-of-order webhooks, checking every money invariant after every step. Chaos tests SIGKILL a
   process around the capture and find exactly one capture afterwards.
@@ -127,8 +127,16 @@ keystroke firewall refuses destructive commands before they reach the console.
   `7WP61145AR824644E` for $9.00, 1 minute 45 seconds from the hold to the capture, 7 agent turns,
   about $0.0039 in model spend, and all 24 warranty checks passed. Two earlier rescues on a local
   test VM captured and passed their warranty too.
-- `tools/live_check.py` against the sandbox: 22 checks passed, none failed (webhook verification
-  skipped, no public URL yet). It covers a partial capture with `final_capture`, request-id
+- Three more hosted runs on the redesigned pages: the sshd typo again (captured $9.00, capture
+  `1FM0294205526573H`, 80 seconds after the hold); "fstab lists a disk that is gone" (captured
+  $19.00, capture `37X1688089973222U`, 87 seconds, 12 agent turns); and the same fault with the
+  owner pressing Stop 6 seconds after the keyboard was lent (authorization `8VN59510G70260907`
+  voided a second later, $0 charged, nothing typed after Stop).
+- Webhooks on real deliveries: those three runs received six PayPal deliveries, one out of order
+  (the capture's event before the authorization's), and all six passed
+  `verify-webhook-signature` and were applied.
+- `tools/live_check.py` against the sandbox: 22 checks passed, none failed (its webhook step ran
+  before the deployment had a public URL; the real deliveries above cover it). It covers a partial capture with `final_capture`, request-id
   replays, a refused second capture, a refused void after capture, a partial refund, a void, and
   four mocked refusals.
 
@@ -153,9 +161,9 @@ keystroke firewall refuses destructive commands before they reach the console.
 
 ## Honest limits
 
-- Three live rescues, all of the sshd fault (one on the hosted Keyhold). The other faults have run
-  on real guests, under KVM too, only with a simulated PayPal and a scripted agent. Webhook
-  verification has not run on real deliveries yet.
+- Six live rescues of two faults (four on the hosted Keyhold): five captured, one stopped by the
+  owner and voided. The other faults have run on real guests, under KVM too, only with a
+  simulated PayPal and a scripted agent.
 - Keyhold drives a local test VM, not a hosting provider's console.
 - On a real screen, Claude's evidence lines are not machine-checked.
 - The keystroke firewall is a screen, not a sandbox.

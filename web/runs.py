@@ -77,6 +77,7 @@ ACTIVE_STAGES = frozenset({"booting", "looking", "quoted", "checkout", "rescuing
 PRE_PAYMENT = frozenset({"booting", "looking", "quoted", "checkout"})
 PAYABLE = frozenset({"quoted", "checkout"})
 KEEP_FINISHED_RUNS = 50
+NO_HOLD_LOG = "no_hold.jsonl"  # runs that ended without a quote: no rescue row, so /judge reads them here
 
 
 class TryRefused(Exception):
@@ -120,6 +121,18 @@ class Thumb:
     width: int
     height: int
     label: str
+    box: tuple[int, int, int, int] | None = None  # where the text is (x0, y0, x1, y1), for a cropped view
+
+
+def text_box(img: Any, *, threshold: int = 48, pad: int = 8) -> tuple[int, int, int, int] | None:
+    """The bounding box of everything brighter than the console background, padded. A console
+    screenshot is mostly black below its last line; the pages crop to this box so the text is
+    larger. None for a blank screen."""
+    box = img.convert("L").point(lambda v: 255 if v > threshold else 0).getbbox()
+    if box is None:
+        return None
+    x0, y0, x1, y1 = box
+    return (max(0, x0 - pad), max(0, y0 - pad), min(img.width, x1 + pad), min(img.height, y1 + pad))
 
 
 class ThumbStore:
@@ -133,7 +146,7 @@ class ThumbStore:
         self,
         *,
         directory: Path | None = None,
-        width: int = 640,
+        width: int = 1280,
         per_run: int = 60,
         runs: int = 40,
         runs_on_disk: int = 300,
@@ -160,7 +173,7 @@ class ThumbStore:
             if self._last_sha.get(run_id) == digest:
                 return None
         try:
-            small, width, height = self._shrink(png)
+            small, width, height, box = self._shrink(png)
         except Exception:  # noqa: BLE001 - a bad image must not stop a rescue
             return None
         with self._lock:
@@ -169,7 +182,7 @@ class ThumbStore:
             self._counter[run_id] = n
             thumbs = self._data.setdefault(run_id, [])
             self._data.move_to_end(run_id)
-            thumb = Thumb(n, at, turn, small, width, height, label)
+            thumb = Thumb(n, at, turn, small, width, height, label, box)
             thumbs.append(thumb)
             del thumbs[: max(0, len(thumbs) - self.per_run)]
             while len(self._data) > self.runs:
@@ -202,7 +215,7 @@ class ThumbStore:
                     return marker.parent.name
         return None
 
-    def _shrink(self, png: bytes) -> tuple[bytes, int, int]:
+    def _shrink(self, png: bytes) -> tuple[bytes, int, int, tuple[int, int, int, int] | None]:
         from PIL import Image
 
         with Image.open(io.BytesIO(png)) as img:
@@ -212,7 +225,17 @@ class ThumbStore:
                 img = img.resize((self.width, height), Image.Resampling.LANCZOS)
             out = io.BytesIO()
             img.save(out, format="PNG", optimize=True)
-            return out.getvalue(), img.width, img.height
+            return out.getvalue(), img.width, img.height, text_box(img)
+
+    @staticmethod
+    def _box_of(png: bytes) -> tuple[int, int, int, int] | None:
+        from PIL import Image
+
+        try:
+            with Image.open(io.BytesIO(png)) as img:
+                return text_box(img.convert("RGB"))
+        except Exception:  # noqa: BLE001 - no crop is fine
+            return None
 
     def _save(self, run_id: str, thumb: Thumb) -> None:
         if self.directory is None:
@@ -223,7 +246,8 @@ class ThumbStore:
             folder.mkdir(parents=True, exist_ok=True)
             (folder / f"{thumb.n}.png").write_bytes(thumb.png)
             meta = {"n": thumb.n, "at": thumb.at, "turn": thumb.turn, "label": thumb.label,
-                    "width": thumb.width, "height": thumb.height}
+                    "width": thumb.width, "height": thumb.height,
+                    "box": list(thumb.box) if thumb.box is not None else None}
             with (folder / "index.jsonl").open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(meta) + "\n")
             stale = folder / f"{thumb.n - self.per_run}.png"
@@ -254,8 +278,10 @@ class ThumbStore:
                 png = (self.directory / run_id / f"{int(meta['n'])}.png").read_bytes()
             except (OSError, ValueError, KeyError, TypeError):
                 continue
+            box = meta.get("box")
+            box = tuple(int(v) for v in box) if isinstance(box, list) and len(box) == 4 else self._box_of(png)
             out.append(Thumb(int(meta["n"]), float(meta["at"]), int(meta["turn"]), png,
-                             int(meta["width"]), int(meta["height"]), str(meta["label"])))
+                             int(meta["width"]), int(meta["height"]), str(meta["label"]), box))
         return out[-self.per_run :]
 
     def list(self, run_id: str, after: int = 0) -> list[Thumb]:
@@ -299,6 +325,8 @@ class TryRun:
     report: RescueReport | None = None
     stop_requested: bool = False
     finished_at: float | None = None
+    look_started_at: float | None = None  # when the free look began (its own timer on the run page)
+    look_failed: bool = False  # the server started, but the free look did not finish
     version: int = 0
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
@@ -388,12 +416,13 @@ class RunManager:
         if len(used) < total:
             free = total - len(used)
             return "The test server is free." if total == 1 else f"{free} of {total} test servers are free."
+        server = "VM" if getattr(self.worlds, "kind", "") == "vm" else "test server"
         if total == 1:
             run = used[0]
             if run.stage == "warranty":
                 return (
-                    "Another rescue is in its warranty checks, which re-probe the running VM. "
-                    "The VM is released when they end."
+                    f"Someone else's fixed server is in its warranty: Keyhold checks it a few more times, "
+                    f"then releases the {server}."
                 )
             return f"Another run is using the test server ({run.stage_label.lower()}). Try again in a few minutes."
         warranty = sum(1 for run in used if run.stage == "warranty")
@@ -503,8 +532,10 @@ class RunManager:
         run.world = world
         run.world_label = world.label
         if run.stop_requested:
-            self._end(run, "finished", "Stopped by the owner before the free look.")
+            self._end(run, "finished", "Cancelled by the owner before the free look. Nothing was held.")
             return
+        with self._lock:
+            run.look_started_at = self.clock.now()
         self._set(run, "looking", "Taking a screenshot of the console. No key is pressed.")
         self._tls.run = run
         try:
@@ -514,13 +545,19 @@ class RunManager:
             )
         except Exception as exc:
             log.exception("free look of run %s failed", run.id)
+            run.look_failed = True
             self._end(run, "failed", f"The free look failed ({type(exc).__name__}). Nothing was held.")
             return
         finally:
             self._tls.run = None
         run.look = look
         if rec is None:
+            if run.stop_requested:
+                # Cancelled during the free look: a cancel, not a no-hold run for the ledger.
+                self._end(run, "finished", "Cancelled by the owner during the free look. Nothing was held.")
+                return
             self._end(run, "no_quote", look.reason)
+            self._record_no_hold(run, look)
             return
         with self._lock:
             run.rescue_id = rec.id
@@ -533,6 +570,129 @@ class RunManager:
             self._end(run, "finished", "Stopped by the owner before checkout. Nothing was held.")
             return
         self._set(run, "quoted", f"Diagnosis: {look.reason}")
+
+    # -- runs that offered no hold ---------------------------------------------------------------
+
+    def _no_hold_path(self) -> Path | None:
+        directory = getattr(self.settings, "data_dir", None)
+        return Path(directory) / NO_HOLD_LOG if directory is not None else None
+
+    def _record_no_hold(self, run: TryRun, look: FreeLook) -> None:
+        """Append the no-hold run to ``no_hold.jsonl`` (never to the rescues table: nothing was
+        held, so there is no rescue). /judge lists these with "$0, no PayPal call"."""
+        path = self._no_hold_path()
+        if path is None:
+            return
+        entry = {
+            "at": self.clock.now(),
+            "fault_id": run.fault_id,
+            "title": run.fault_title,
+            "fault_class": look.fault_class,
+            "reason": look.reason,
+        }
+        try:
+            with self._lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(entry) + "\n")
+        except OSError:
+            log.warning("could not record the no-hold run %s", run.id, exc_info=True)
+
+    def no_hold_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        """The latest runs that ended without a hold, newest first."""
+        path = self._no_hold_path()
+        if path is None:
+            return []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
+        except OSError:
+            return []
+        out = []
+        for line in reversed(lines):
+            try:
+                item = json.loads(line)
+                out.append({
+                    "at": float(item["at"]),
+                    "fault_id": str(item.get("fault_id", "")),
+                    "title": str(item.get("title", "")),
+                    "fault_class": str(item.get("fault_class") or ""),
+                    "reason": str(item.get("reason", "")),
+                })
+            except (ValueError, KeyError, TypeError):
+                continue
+        return out
+
+    # -- who holds the test server -------------------------------------------------------------
+
+    def free_at(self, run: TryRun) -> tuple[float, str] | None:
+        """When the server ``run`` holds should be free, and how sure that is ("about" for a
+        warranty, whose checks run on a schedule; "at the latest" for an unpaid quote). None
+        while it depends on the agent."""
+        if run.stage == "warranty" and run.rescue_id:
+            started = self.ledger.events(run.rescue_id, kind="warranty_started")
+            if started:
+                d = started[0].data
+                with contextlib.suppress(KeyError, TypeError, ValueError):
+                    return float(d["started_at"]) + float(d["interval_s"]) * int(d["checks"]), "about"
+            return None
+        if run.stage in PAYABLE and run.quote_deadline is not None:
+            return run.quote_deadline, "at the latest"
+        return None
+
+    def holds_slot(self, run: TryRun) -> bool:
+        with self._lock:
+            return run.id in self._slots
+
+    def warranty_progress(self, run: TryRun) -> tuple[int, int] | None:
+        """(checks done, checks planned) for a run in its warranty, or None."""
+        if run.stage != "warranty" or not run.rescue_id:
+            return None
+        started = self.ledger.events(run.rescue_id, kind="warranty_started")
+        if not started:
+            return None
+        try:
+            total = int(started[0].data["checks"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return len(self.ledger.events(run.rescue_id, kind="warranty_check")), total
+
+    def busy_view(self, viewer: str | None = None) -> dict[str, Any]:
+        """The busy line on /try: the slot message, when the server frees up, a link to watch
+        the run that holds it, and whether that run is the viewer's own (then what it is doing:
+        its warranty check n of N, or a cancel that waits for the boot to end)."""
+        with self._lock:
+            used = [self._runs[i] for i in self._slots if i in self._runs]
+        full = len(used) >= self.slot_count
+        mine = next((r for r in used if viewer and r.owner == viewer), None)
+        first = mine or (used[0] if used else None)
+        view: dict[str, Any] = {
+            "busy": full,
+            "message": self.slot_message(),
+            "mine": mine is not None,
+            "mine_stage": mine.stage if mine is not None else None,
+            "mine_cancelling": bool(mine is not None and mine.stop_requested and mine.stage in ("booting", "looking")),
+            "run_url": f"/runs/{mine.id}" if mine is not None else None,
+            "watch_url": None,
+            "watch_title": None,
+            "free_at": None,
+            "free_at_how": None,
+            "stage_label": None,
+            "warranty_done": None,
+            "warranty_total": None,
+        }
+        if first is None:
+            return view
+        view["watch_title"] = first.fault_title
+        view["stage_label"] = first.stage_label
+        if first.rescue_id and first.stage in ("rescuing", "warranty", "checkout"):
+            view["watch_url"] = f"/rescues/{first.rescue_id}"
+        when = self.free_at(first) if full else None
+        if when is not None:
+            view["free_at"], view["free_at_how"] = when
+        progress = self.warranty_progress(first)
+        if progress is not None:
+            view["warranty_done"], view["warranty_total"] = progress
+        return view
 
     # -- checkout ------------------------------------------------------------------------------
 
@@ -704,6 +864,21 @@ class RunManager:
             log.exception("warranty of rescue %s stopped on an error", rid)
 
     # -- owner Stop ----------------------------------------------------------------------------
+
+    def cancel(self, run: TryRun) -> str:
+        """Cancel before a hold, decided under the run's lock so it cannot race the authorize call:
+        "live" when the hold went live meanwhile (that is Stop on the live page, never a cancel),
+        "cancelled" otherwise."""
+        with run.lock:
+            if run.rescue_id is not None and run.stage in ("rescuing", "warranty"):
+                return "live"
+            # PayPal answered the authorization (it may still be PENDING): there is a hold, so this
+            # is the live page's Stop, which says what happened to it, not "Nothing was held".
+            if run.rescue_id is not None and self.ledger.get(run.rescue_id).authorization_id is not None:
+                return "live"
+            if run.active:
+                self.stop(run)
+            return "cancelled"
 
     def stop(self, run: TryRun) -> StopResult | None:
         with run.lock:

@@ -319,11 +319,13 @@ with two test servers at once.
 
 ## Not covered on real guests
 
-- Revoking the hold in the middle of a session (owner Stop, or PayPal voiding the authorization)
-  and the stop taking effect within one action. This is covered by the unit, property and E2E
-  tests with fakes, not on a real guest.
+- Revoking the hold in the middle of a session when PayPal voids the authorization from outside
+  Keyhold. This is covered by the unit, property and E2E tests with fakes, not on a real guest.
+  An owner Stop on a real guest did run later, on the hosted Keyhold with the real sandbox and
+  model: the hold was voided a second after Stop and nothing was typed after it
+  ([evidence/rescue-hosted-a44702f2.md](evidence/rescue-hosted-a44702f2.md)).
 - The real PayPal sandbox and the real model. This run used FakePayPal and a scripted model. Later
-  runs with both, on the sshd fault, are in [evidence/](evidence/README.md).
+  runs with both, on the sshd and fstab faults, are in [evidence/](evidence/README.md).
 - The warranty. `prove.py` turns it off (`RescueConfig(warranty=False)`). The live sandbox rescues
   ran the judge-mode warranty on a test VM (24 checks each, all passed; see [evidence/](evidence/README.md)).
   A failing warranty, which refunds, has not run on a real guest.

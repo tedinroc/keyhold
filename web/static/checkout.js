@@ -34,35 +34,39 @@
   /* The browser names the rescue only; the server prices the order from the stored quote. */
   function createOrder() {
     return K.api("POST", "/api/orders", { rescueId: rescueId }).then(function (data) {
-      say("PayPal order " + data.orderId + " created: intent " + data.intent + ", $" + data.amount + ".");
+      say("Order for a $" + data.amount + " hold created. Approve it in PayPal.");
       return { orderId: data.orderId };
     });
   }
 
   async function authorize(orderId) {
-    say("Approved. Authorizing the hold with PayPal…");
+    say("Approved. Asking PayPal for the hold…");
     var data = await K.api("POST", "/api/orders/" + encodeURIComponent(orderId) + "/authorize");
     if (data.state === "VOIDED") {
       say("PayPal did not give a clean hold of the quote, so it was released. Nothing is charged.", "warn");
     } else {
-      say("PayPal holds $" + (data.amount || amount) + " (authorization " + data.authorizationId + "). Opening the live status page.", "ok");
+      say("PayPal holds $" + (data.amount || amount) + ". Lending the keyboard and opening the live page…", "ok");
     }
-    window.location.assign(data.statusUrl);
+    K.reloadTo(data.statusUrl);
   }
 
+  /* Offline: the button says aria-disabled while the approval runs (a disabled button would drop
+   * keyboard focus); on an error the message is announced and focus goes back to the button. */
   if (body.getAttribute("data-mode") === "offline") {
     var offlineButton = document.getElementById("offline-approve");
     if (!offlineButton) return;
     offlineButton.addEventListener("click", async function () {
-      offlineButton.disabled = true;
+      if (offlineButton.getAttribute("aria-disabled") === "true") return;
+      offlineButton.setAttribute("aria-disabled", "true");
       try {
         var order = await createOrder();
-        say("Simulated buyer approves order " + order.orderId + " in FakePayPal…");
+        say("The simulated buyer approves the order in FakePayPal…");
         await K.api("POST", "/api/offline/orders/" + encodeURIComponent(order.orderId) + "/approve");
         await authorize(order.orderId);
       } catch (error) {
         say(error.message, "warn");
-        offlineButton.disabled = false;
+        offlineButton.removeAttribute("aria-disabled");
+        offlineButton.focus();
       }
     });
     return;
@@ -70,13 +74,22 @@
 
   var paypalButton = document.getElementById("paypal-button");
   var loading = document.getElementById("paypal-loading");
+  var hardFailure = false;
 
-  function failed(text) {
+  /* A definite failure (the SDK did not load, PayPal is not offered) is never overwritten by the
+   * softer "taking long" note that a timer writes later. */
+  function failed(text, hard) {
+    if (hardFailure && !hard) return;
+    if (hard) hardFailure = true;
     if (loading) {
-      loading.textContent = text;
+      loading.textContent = text; // a status region: the failure is announced
       loading.hidden = false;
     }
   }
+  // PayPal's script can be slow or blocked; say so instead of leaving a dashed box.
+  var sdkTimer = window.setTimeout(function () {
+    if (paypalButton && paypalButton.hidden) failed("PayPal is taking long to load. Check that pop-ups and PayPal are not blocked, then reload. Nothing is held.");
+  }, 15000);
 
   async function onPayPalWebSdkLoaded() {
     try {
@@ -88,7 +101,7 @@
       });
       var methods = await sdkInstance.findEligibleMethods({ currencyCode: "USD", amount: amount });
       if (!methods.isEligible("paypal")) {
-        failed("PayPal is not offered for this payment in this browser. Nothing is held.");
+        failed("PayPal is not offered for this payment in this browser. Nothing is held.", true);
         return;
       }
       var session = sdkInstance.createPayPalOneTimePaymentSession({
@@ -114,6 +127,7 @@
           say("PayPal reported an error" + (error && error.code ? " (" + error.code + ")" : "") + ". Nothing is held.", "warn");
         }
       });
+      window.clearTimeout(sdkTimer);
       if (loading) loading.hidden = true;
       paypalButton.hidden = false;
       paypalButton.addEventListener("click", async function () {
@@ -125,7 +139,7 @@
         }
       });
     } catch (error) {
-      failed("PayPal could not start: " + ((error && error.message) || "unknown error") + ".");
+      failed("PayPal could not start: " + ((error && error.message) || "unknown error") + ".", true);
     }
   }
 
@@ -133,6 +147,9 @@
   script.src = body.getAttribute("data-sdk-url");
   script.async = true;
   script.onload = onPayPalWebSdkLoaded;
-  script.onerror = function () { failed("The PayPal JS SDK could not be loaded."); };
+  script.onerror = function () {
+    window.clearTimeout(sdkTimer);
+    failed("The PayPal JS SDK could not be loaded. Check that PayPal is not blocked, then reload. Nothing is held.", true);
+  };
   document.head.appendChild(script);
 })();

@@ -193,7 +193,8 @@ def build_services(
         else:
             gateway = FakePayPal(clock=clock, state_path=settings.fake_paypal_path)
     if worlds is None:
-        worlds = SimulatedWorlds() if settings.simulated else VmWorlds(settings)
+        worlds = (SimulatedWorlds(stop_path_turn_s=settings.sim_stop_path_turn_s) if settings.simulated
+                  else VmWorlds(settings))
 
     sink_holder: dict[str, RunManager] = {}
 

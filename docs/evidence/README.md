@@ -1,7 +1,8 @@
 # Live runs (2026-11-07 and 11-08, UTC)
 
-Four runs against the real PayPal sandbox. Every ID below can be looked up in the sandbox
-business account that owns the REST app. Money is sandbox money.
+Seven runs against the real PayPal sandbox: the money check, five rescues that captured and one
+that the owner stopped. Every ID below can be looked up in the sandbox business account that
+owns the REST app. Money is sandbox money.
 
 | File | What ran | Result |
 |---|---|---|
@@ -9,6 +10,23 @@ business account that owns the REST app. Money is sandbox money.
 | [rescue-first-a2b969fd.md](rescue-first-a2b969fd.md) | `/try` in live mode: the "Typo in sshd_config" test VM, Claude Haiku 5.5, a $9.00 hold approved through the JS SDK v6 button | captured $9.00 (capture `6WS22323FC4216719`) 2 min 28 s after the hold; warranty 24 checks of 24 passed |
 | [rescue-hosted-53f4549c.md](rescue-hosted-53f4549c.md) | the same flow on the hosted Keyhold: the public URL, an x86-64 cloud VM with KVM, the judge link, a sandbox buyer approving on the public page | captured $9.00 (capture `7WP61145AR824644E`) 1 min 45 s after the hold; 7 agent turns; about $0.0039 of model spend; warranty 24 checks of 24 passed |
 | [rescue-clean-3fcc3c58.md](rescue-clean-3fcc3c58.md) | the same flow after the two fixes below | captured $9.00 (capture `8WA56714MN162430M`) 1 min 48 s after the hold; 8 agent turns; about $0.0034 of model spend; warranty 24 checks of 24 passed |
+| [rescue-hosted-8cf5a71c.md](rescue-hosted-8cf5a71c.md) | hosted, on the redesigned pages, with the webhook registered: "Typo in sshd_config" | captured $9.00 (capture `1FM0294205526573H`) 80 s after the hold; 7 agent turns; about $0.0030 of model spend; warranty 6 checks of 6 passed; 2 webhooks verified |
+| [rescue-hosted-a19567da.md](rescue-hosted-a19567da.md) | hosted: "fstab lists a disk that is gone", the T2 fault | captured $19.00 (capture `37X1688089973222U`) 87 s after the hold; 12 agent turns; about $0.0051 of model spend; warranty 6 checks of 6 passed; 2 webhooks verified |
+| [rescue-hosted-a44702f2.md](rescue-hosted-a44702f2.md) | hosted: the same fault, and the owner pressed **Stop** 6 s after the keyboard was lent | authorization `8VN59510G70260907` voided 1 s after Stop; $0 charged; the agent's only input was the console password, and nothing was typed after Stop; 2 webhooks verified, the second one `PAYMENT.AUTHORIZATION.VOIDED` |
+
+## Webhooks on real deliveries
+
+The webhook was registered for the hosted URL with `tools/register_webhook.py` (ten event types)
+and `PAYPAL_WEBHOOK_ID` set on the deployment. The three runs above received six deliveries:
+`PAYMENT.AUTHORIZATION.CREATED` three times, `PAYMENT.CAPTURE.COMPLETED` twice and
+`PAYMENT.AUTHORIZATION.VOIDED` once. All six passed `verify-webhook-signature` and were applied.
+One arrived out of order: in run 8cf5a71c PayPal delivered the capture's event 6 s before the
+authorization's, and the ledger, which never moves a state backwards, applied both without
+changing the outcome.
+
+Hosted timing: these three runs used a compressed warranty, 6 re-probes 20 s apart, so a judge
+sees the whole plan finish in two minutes. The real plan is 24 hourly checks; the earlier runs
+used 24 checks a minute apart.
 
 ## What the first rescue showed, and what changed
 
@@ -35,6 +53,6 @@ Both problems showed up in the first live runs, and both are fixed.
   list price (`web/spend.py`); the calls went through an Anthropic-compatible endpoint
   (`ANTHROPIC_BASE_URL`), so the amount billed may differ.
 - Judge-mode timing was on: the capture needs two probe passes at least 10 seconds apart, and the
-  warranty re-probes every minute for 24 minutes.
-- The test VMs run under CPU emulation (no KVM), which makes every console step slower than on a
-  hosted server.
+  warranty re-probes every minute for 24 minutes (every 20 s, 6 times, in the last three runs).
+- The two local runs used CPU emulation (no KVM), which makes every console step slower. The
+  hosted runs used an x86-64 cloud VM with KVM.

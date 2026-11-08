@@ -1,37 +1,208 @@
-{% macro stage_steps(stage) -%}
-{%- set order = ['booting', 'looking', 'quoted', 'checkout', 'rescuing'] -%}
-{%- set labels = {'booting': 'Boot', 'looking': 'Free look', 'quoted': 'Quote', 'checkout': 'Hold', 'rescuing': 'Rescue'} -%}
-{%- set current = order.index(stage) if stage in order else (5 if stage in ['warranty', 'finished'] else -1) -%}
-<ol class="steps" aria-label="Progress">
-  {% for s in order %}
-  <li class="step {% if loop.index0 < current %}step-done{% elif loop.index0 == current %}step-current{% endif %}" {% if loop.index0 == current %}aria-current="step"{% endif %}>{{ labels[s] }}</li>
-  {% endfor %}
-</ol>
+{# Shared pieces of the story-first pages. Everything here is plain text from the views; the
+   status page re-renders the same pieces from SSE (static/common.js) with textContent only. #}
+
+{% macro icon(name, cls='ic') -%}
+<svg class="{{ cls }}" aria-hidden="true" focusable="false"><use href="#{{ name }}"/></svg>
 {%- endmacro %}
 
-{% macro quote_card(quote, probe) -%}
-<section class="card" aria-labelledby="quote-title">
-  <h2 id="quote-title" class="card-title">Quote</h2>
-  <p class="quote-price"><span class="amount">${{ quote.amount }}</span> <span class="pill pill-neutral">{{ quote.tier }}</span></p>
-  <p class="diagnosis"><span class="muted small">Diagnosis</span><br><strong>{{ quote.title }}</strong><br><code>{{ quote.fault_class }}</code></p>
-  <h3 class="mini-title">Evidence from the screen</h3>
-  <ul class="evidence">
-    {% for line in quote.evidence %}<li><code>{{ line }}</code></li>{% endfor %}
-  </ul>
-  <h3 class="mini-title">Plan</h3>
-  <p class="plan">{{ quote.plan }}</p>
-  <p class="hash"><span class="muted">Quote hash</span> <code>{{ quote.quote_hash }}</code></p>
+{% macro status_line(p) -%}
+{% set s = p.status %}
+<div class="status-block" id="status-block">
+  <p class="status{% if s.xl %} xl{% endif %}" id="status" data-state="{{ p.state }}" data-sig="{{ s.head }}|{{ s.tail }}" tabindex="-1" aria-live="polite" aria-atomic="true"><span class="head">{{ s.head }}</span>{% if s.tail %}<span class="dotsep"> · </span><span class="tail">{{ s.tail }}</span>{% endif %}</p>
+  <p class="substatus" id="substatus" {% if not s.sub %}hidden{% endif %}>{{ s.sub }}</p>
+</div>
+{%- endmacro %}
+
+{% macro step_sr(state) -%}
+<span class="sr-only">{{ {'done': ' (done)', 'current': ' (now)', 'skipped': ' (skipped)', 'failed': ' (failed)'}.get(state, ' (next)') }}</span>
+{%- endmacro %}
+
+{% macro lock_svg(state) -%}
+<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path class="shackle" d="{{ 'M8 10.5V7a4 4 0 0 1 7.75-1.4' if state == 'lent' else 'M8 10.5V7.5a4 4 0 0 1 8 0v3' }}"/><rect x="5" y="10.5" width="14" height="10" rx="2.2"/><path d="M12 14.2v2.6"/></svg>
+{%- endmacro %}
+
+{% macro step_sig(s) -%}{{ s.state }}|{{ s.tone }}|{{ s.note }}|{{ s.icon }}|{{ s.label }}{%- endmacro %}
+{% macro outcome_sig(o) -%}{{ o.state }}|{{ o.label }}|{{ o.note }}|{{ o.icon }}{%- endmacro %}
+
+{% macro progress(p) -%}
+<div class="progress" id="progress" data-phase="{{ p.phase }}">
+  <ol class="story" id="story" aria-label="Progress">
+    {% for s in p.steps %}
+    <li class="st {{ s.state }}{% if s.tone %} {{ s.tone }}{% endif %}" data-key="{{ s.key }}" data-sig="{{ step_sig(s) }}" {% if s.state == 'current' %}aria-current="step"{% endif %}>
+      <span class="st-node">{{ icon(s.icon) }}{% if s.state == 'done' %}<span class="badge">{{ icon('i-check') }}</span>{% endif %}</span>
+      <span class="st-label">{{ s.label }}{{ step_sr(s.state) }}</span>
+      <span class="st-note">{{ s.note }}</span>
+    </li>
+    {% endfor %}
+    {% set o = p.outcome %}
+    <li class="st outcome {{ o.state }}" data-key="outcome" data-sig="{{ outcome_sig(o) }}">
+      <span class="st-node">{{ icon(o.icon) }}<span class="o-label">{{ o.label }}</span></span>
+      <span class="st-note">{{ o.note }}</span>
+    </li>
+  </ol>
+  {# The row of icons is rebuilt only when a step changes; the line under it only changes its words. #}
+  <div class="story-m" id="story-m" data-sig="{% for s in p.steps %}{{ s.state }}|{{ s.tone }}|{{ s.icon }};{% endfor %}{{ p.outcome.state }}|{{ p.outcome.label }}|{{ p.outcome.icon }}">
+    <p class="line"><strong id="line-lead">{{ p.line.lead }}</strong> · <span id="line-text">{{ p.line.text }}</span></p>
+    <div class="sm-row" aria-hidden="true">
+      {% for s in p.steps %}
+      <span class="sm-node {{ s.state }}{% if s.tone %} {{ s.tone }}{% endif %}">{{ icon(s.icon) }}{% if s.state == 'done' %}<span class="badge">{{ icon('i-check') }}</span>{% endif %}</span>
+      {% if not loop.last %}<span class="sm-link{% if s.state == 'done' and p.steps[loop.index].state in ['done', 'current'] %} {{ s.tone or 'done' }}{% endif %}"></span>{% endif %}
+      {% endfor %}
+      <span class="sm-pill {{ p.outcome.state }}">{{ icon(p.outcome.icon) }}{{ p.outcome.label }}</span>
+    </div>
+  </div>
+  {% set l = p.lock %}
+  <p class="lockplate" id="lock" data-lock="{{ l.state }}">
+    <span class="lk">{{ lock_svg(l.state) }}</span>
+    <span class="tx"><b id="lock-title">{{ l.title }}</b><small id="lock-evidence">{{ l.evidence }}</small></span>
+  </p>
+</div>
+{%- endmacro %}
+
+{% macro crop_style(c) -%}
+{% if c %}--iw:{{ c.iw }};--cx:{{ c.x }};--cy:{{ c.y }};--cw:{{ c.w }};--ch:{{ c.h }};--pcx:{{ c.px }};--pcw:{{ c.pw }};--pcy:{{ c.py }};--pch:{{ c.ph }}{% endif %}
+{%- endmacro %}
+
+{# data-cut / data-dcut: a line runs past the phone's (desktop's) band, so that edge fades; the full screen is one tap away. #}
+{% macro shot(t, alt) -%}
+<a class="shot{% if t.crop %} crop{% endif %}" id="shot" href="{{ t.url }}" data-zoom style="{{ crop_style(t.crop) }}"{% if t.crop and t.crop.cut %} data-cut="1"{% endif %}{% if t.crop and t.crop.dcut %} data-dcut="1"{% endif %} aria-label="Open the full screen: {{ alt }}">
+  <img src="{{ t.url }}" alt="{{ alt }}" width="{{ t.width }}" height="{{ t.height }}" id="shot-img">
+</a>
+{%- endmacro %}
+
+{# The console, always dark: title bar with time, a keyboard chip and Full screen, the screenshot
+   cropped to its text (tap for the full screen), the last typed line, and, once there are two
+   screens, a stepper through earlier ones. #}
+{% macro console(thumbs, title='Console', lent=False, typed=None, stepper=True, empty='No console screenshots are stored for this rescue.') -%}
+{% set t = thumbs[-1] if thumbs else None %}
+<figure class="console" id="console">
+  <figcaption class="console-bar">{{ icon('i-terminal') }}<span class="t">{{ title }}</span><time id="shot-time">{% if t %}{{ (t.at or '')[11:19] }} UTC{% endif %}</time>
+    <span class="kchip{% if not lent %} locked{% endif %}" id="kchip">{{ icon('i-unlock' if lent else 'i-lock') }}<span id="kchip-text">{{ 'Keyboard: agent · hold live' if lent else 'Keyboard locked' }}</span></span>
+    <button type="button" class="full" id="step-full" data-zoom-open {% if not t %}hidden{% endif %}>Full screen</button></figcaption>
+  {% if t %}
+  {{ shot(t, 'Console screen at ' ~ (t.at or '')[11:19] ~ ' UTC, ' ~ t.label) }}
+  {% else %}
+  <div class="shot-empty" id="shot-empty"><p class="wait-note"><span class="dot" aria-hidden="true"></span><span id="shot-empty-text">{{ empty }}</span></p></div>
+  {% endif %}
+  {% if typed is not none %}
+  <div class="typed" id="typed" {% if not typed %}hidden{% endif %}>
+    <span class="lbl">{{ icon('i-type') }}Last typed</span>
+    <code id="typed-text">{{ typed }}</code>
+  </div>
+  {% endif %}
+  {% if stepper %}
+  <div class="stepper" id="stepper" {% if thumbs | length < 2 %}hidden{% endif %}>
+    <span class="step-nav" id="step-nav">
+      <button type="button" id="step-prev" aria-label="Previous screenshot" {% if thumbs | length < 2 %}aria-disabled="true"{% endif %}>{{ icon('i-chev-l') }}</button>
+      <span class="pos" id="step-pos">{{ thumbs | length }} / {{ thumbs | length }}</span>
+      <button type="button" id="step-next" aria-label="Next screenshot" aria-disabled="true">{{ icon('i-chev') }}</button>
+    </span>
+  </div>
+  {% endif %}
+  <ol class="thumb-list" id="thumbs" hidden>
+    {% for th in thumbs %}<li data-n="{{ th.n }}" data-url="{{ th.url }}" data-at="{{ th.at }}" data-label="{{ th.label }}" data-width="{{ th.width }}" data-height="{{ th.height }}" data-crop="{{ crop_style(th.crop) }}"{% if th.crop and th.crop.cut %} data-cut="1"{% endif %}{% if th.crop and th.crop.dcut %} data-dcut="1"{% endif %}></li>{% endfor %}
+  </ol>
+</figure>
+{%- endmacro %}
+
+{% macro zoom_dialog() -%}
+<dialog class="zoom" id="zoom" aria-labelledby="zoom-title">
+  <div class="zoom-bar"><span class="grow" id="zoom-title">Full console screen</span><button type="button" id="zoom-close">Close</button></div>
+  <img id="zoom-img" src="data:," alt="">
+</dialog>
+{%- endmacro %}
+
+{% macro money_box(m) -%}
+<section class="money {{ m.tone }}" id="money" aria-labelledby="money-label">
+  <span class="m-ill" aria-hidden="true">{{ icon(m.icon) }}</span>
+  <div class="m-main">
+    <p class="m-label" id="money-label">{{ m.label }}</p>
+    <p class="m-amt" id="money-amount-line"><span id="money-amount">${{ m.amount }}</span><span class="unit" id="money-unit">{{ m.unit }}</span></p>
+    <p class="m-sub" id="money-sentence" {% if not m.sentence %}hidden{% endif %}>{{ m.sentence }}</p>
+    <div class="stats" id="money-stats" {% if not m.stats %}hidden{% endif %}>
+      {% for st in m.stats %}<p class="stat"><b>{{ st.value }}</b><span>{{ st.label }}</span></p>{% endfor %}
+    </div>
+    <p class="m-warn" id="money-warning" role="alert" {% if not m.warning %}hidden{% endif %}>{{ m.warning or '' }}</p>
+  </div>
+  {% if caller is defined %}<div class="m-act" id="money-actions">{{ caller() }}</div>{% endif %}
 </section>
+{%- endmacro %}
+
+{# PayPal, read live: PayPal's own status words, what they mean, and the two ticks per call. #}
+{% macro paypal_card(pt) -%}
+<section class="card section-gap" aria-labelledby="pp-h" id="paypal-card">
+  <div class="card-head"><h2 class="h3" id="pp-h">PayPal, read live</h2><p class="fine" id="paypal-checked">{{ pt.checked }}</p></div>
+  {% if pt.empty %}
+  <p class="pp-empty" id="paypal-empty">No PayPal order was created. Nothing was ever held.</p>
+  {% endif %}
+  {# Explicit table roles: below 900 px the rows are stacked with display:block, which drops the
+     table semantics in some browsers. #}
+  <table class="pp-table" id="paypal-table" role="table" {% if pt.empty %}hidden{% endif %}>
+    <caption class="sr-only">PayPal objects for this rescue, with PayPal's status and what it means</caption>
+    <thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">Object</th><th scope="col" role="columnheader">Status</th><th scope="col" role="columnheader">What it means</th><th scope="col" role="columnheader" class="c-amt">Amount</th><th scope="col" role="columnheader">PayPal answered</th><th scope="col" role="columnheader">Webhook</th></tr></thead>
+    <tbody id="paypal-rows" role="rowgroup">
+      {% for r in pt.rows %}{{ paypal_row(r) }}{% endfor %}
+    </tbody>
+  </table>
+  <ul class="errors" id="paypal-errors">{% for e in pt.errors %}<li>{{ e }}</li>{% endfor %}</ul>
+</section>
+{%- endmacro %}
+
+{% macro paypal_row(r) -%}
+<tr role="row" data-object="{{ r.key }}"{% if r.absent %} class="absent"{% endif %}>
+  <td role="cell" class="c-obj"><span class="obj">{{ r.object }}</span>{% if r.id %}<span class="id" title="{{ r.id }}">{{ r.short_id }}</span>{% endif %}</td>
+  <td role="cell" class="c-status"><span class="pill {{ r.pill }}">{{ r.status_text }}</span></td>
+  <td role="cell" class="c-mean">{{ r.means }}</td>
+  <td role="cell" class="c-amt amt">{{ r.amount }}</td>
+  <td role="cell" class="c-api">{% if r.api %}<span class="ticks">{% for t in r.api %}<span class="tick">{{ icon('i-check') }}{{ t.at }}{% if t.label %} <span class="tl">{{ t.label }}</span>{% endif %}</span>{% endfor %}</span>{% endif %}{% for w in r.api_waiting %}<span class="muted">{{ w }}</span>{% endfor %}{% if not r.api and not r.api_waiting %}<span class="muted">—</span>{% endif %}{% if r.final_capture %}<span class="final" title="final_capture=true: the rest of the hold is released, no second capture">final</span>{% endif %}</td>
+  <td role="cell" class="c-hook">{% if r.webhook %}<span class="ticks">{% for t in r.webhook %}<span class="tick">{{ icon('i-check') }}{{ t.at }}{% if t.label %} <span class="tl">{{ t.label }}</span>{% endif %}</span>{% endfor %}</span>{% else %}<span class="muted">{{ r.webhook_empty }}</span>{% endif %}</td>
+</tr>
+{%- endmacro %}
+
+{% macro moment_row(mo, newest=False) -%}
+<li class="mo{% if newest %} newest{% endif %}" data-id="{{ mo.id }}" data-at="{{ mo.at }}" data-group="{{ mo.group }}">
+  <time>{{ (mo.at or '')[11:19] }}</time>
+  <span class="mo-ic{% if mo.tone %} {{ mo.tone }}{% endif %}">{{ icon(mo.icon) }}</span>
+  <p class="what"{% if mo.title %} title="{{ mo.title }}"{% endif %}>{% if mo.strong %}<strong>{{ mo.strong }}</strong> {% endif %}{% if mo.code %}<code>{{ mo.code }}</code> {% endif %}{{ mo.text }}</p>
+</li>
+{%- endmacro %}
+
+{# The full log: every timeline row, state codes in plain words. #}
+{% macro full_log(timeline) -%}
+<details class="fold" id="full-log">
+  <summary>{{ icon('i-chev') }}Full log <span class="muted" id="log-count">{{ timeline | length }} rows</span></summary>
+  <div class="fold-body">
+    <ol class="log" id="timeline">
+      {% for e in timeline %}
+      <li class="{{ e.group }}{% if e.tone == 'warn' %} warn{% endif %}{% if e.muted %} muted-row{% endif %}" data-id="{{ e.id }}" data-at="{{ e.at }}">
+        <time>{{ (e.at or '')[11:19] }}</time><span class="tag">{{ e.group_label }}</span><span class="txt" {% if e.plain %}title="{{ e.text }}"{% endif %}>{{ e.plain or e.text }}</span>
+      </li>
+      {% endfor %}
+    </ol>
+  </div>
+</details>
+{%- endmacro %}
+
+{# Audit details: the quote, the owner probe and the PayPal intent, word for word. #}
+{% macro quote_audit(quote, probe) -%}
+<div>
+  <h3>Quote</h3>
+  <dl class="kv">
+    <dt>Fault class</dt><dd><code>{{ quote.fault_class }}</code></dd>
+    <dt>Tier</dt><dd>{{ quote.tier }} · ${{ quote.amount }}</dd>
+    <dt>Quote hash</dt><dd><code>{{ quote.quote_hash }}</code></dd>
+  </dl>
+</div>
 {% if probe %}
-<section class="card" aria-labelledby="probe-title">
-  <h2 id="probe-title" class="card-title">Owner probe, fixed at checkout</h2>
-  <p>A capture happens only after this check passes twice, far enough apart, with no failure between.</p>
+<div>
+  <h3>Owner probe, fixed at checkout</h3>
+  <p class="fine">A capture happens only after this check passes twice, far enough apart, with no failure between.</p>
   <dl class="kv">
     <dt>SSH login</dt><dd>as <code>{{ probe.ssh_user }}</code> on port {{ probe.ssh_port }}, with a key only the probe holds</dd>
     <dt>Probe key</dt><dd><code>{{ probe.key_fingerprint }}</code></dd>
     <dt>Page</dt><dd>{{ probe.page }}: {{ probe.expect }}</dd>
-    <dt>Spec hash</dt><dd><code class="wrap-anywhere">{{ probe.spec_hash }}</code><br><span class="muted">Sent as the order's <code>custom_id</code>.</span></dd>
+    <dt>Spec hash</dt><dd><code>{{ probe.spec_hash }}</code><br><span class="fine">Sent as the order's <code>custom_id</code>.</span></dd>
   </dl>
-</section>
+</div>
 {% endif %}
 {%- endmacro %}

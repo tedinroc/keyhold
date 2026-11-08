@@ -17,7 +17,7 @@ def test_landing_page_says_what_keyhold_is(web) -> None:
     page = web.client.get("/")
     assert page.status_code == 200
     assert "No hold, no keystrokes." in page.text
-    assert "Only your server answering can charge you." in page.text
+    assert "Only your server answering can charge&nbsp;you." in page.text  # "you." never alone on a line
     for step in ("Free look", "Hold", "The lock", "Capture on your probe only"):
         assert step in page.text
     assert 'href="/try"' in page.text and 'href="/judge"' in page.text
