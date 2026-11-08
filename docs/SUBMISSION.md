@@ -122,10 +122,11 @@ keystroke firewall refuses destructive commands before they reach the console.
   30 seconds, with a simulated PayPal and a scripted agent. The five solvable ones each ended in
   one capture after two probe passes; for the GRUB fault, a hold placed by hand was voided when
   the agent gave up. Input sent before a hold reached the console zero times.
-- A full rescue ran in the PayPal sandbox with Claude Haiku 5.5 on a test VM: order
-  `67P246944Y513543U`, authorization `5VS789774Y014152F`, capture `8WA56714MN162430M` for $9.00,
-  1 minute 48 seconds from the hold to the capture, 8 agent turns, about $0.0034 in model spend.
-  It passed all 24 warranty checks, and so did an earlier rescue that captured too.
+- A full rescue ran on the hosted Keyhold, from the public page: PayPal sandbox, Claude Haiku 5.5,
+  an x86-64 test VM under KVM. Order `9DX392958A657063W`, authorization `68M23905BN0687322`, capture
+  `7WP61145AR824644E` for $9.00, 1 minute 45 seconds from the hold to the capture, 7 agent turns,
+  about $0.0039 in model spend, and all 24 warranty checks passed. Two earlier rescues on a local
+  test VM captured and passed their warranty too.
 - `tools/live_check.py` against the sandbox: 22 checks passed, none failed (webhook verification
   skipped, no public URL yet). It covers a partial capture with `final_capture`, request-id
   replays, a refused second capture, a refused void after capture, a partial refund, a void, and
@@ -152,8 +153,9 @@ keystroke firewall refuses destructive commands before they reach the console.
 
 ## Honest limits
 
-- Two live rescues, both of the sshd fault. The other faults have run on real guests only with a
-  simulated PayPal and a scripted agent. Webhook verification has not run on real deliveries.
+- Three live rescues, all of the sshd fault (one on the hosted Keyhold). The other faults have run
+  on real guests, under KVM too, only with a simulated PayPal and a scripted agent. Webhook
+  verification has not run on real deliveries yet.
 - Keyhold drives a local test VM, not a hosting provider's console.
 - On a real screen, Claude's evidence lines are not machine-checked.
 - The keystroke firewall is a screen, not a sandbox.

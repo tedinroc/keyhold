@@ -268,6 +268,7 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
             "slot_busy": svc.runs.slots_full(),
             "slot_message": svc.runs.slot_message(),
             "slots_total": svc.runs.slot_count,
+            "boot_span": svc.runs.worlds.boot_span() if hasattr(svc.runs.worlds, "boot_span") else "30 to 90 seconds",
             "slots_free": svc.runs.slot_count - svc.runs.slots_used(),
             "problems": svc.runs.worlds.problems(),
             "paid_model": svc.runs.worlds.paid_model,

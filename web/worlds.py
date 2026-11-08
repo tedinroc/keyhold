@@ -526,6 +526,13 @@ class VmWorlds:
         self._problems = (now, found)
         return list(found)
 
+    def boot_span(self) -> str:
+        """How long a fault takes to show, for the /try page: seconds with KVM, longer emulated."""
+        try:
+            return "5 to 30 seconds" if self.runner.kvm_available() else "30 to 90 seconds"
+        except Exception:
+            return "30 to 90 seconds"
+
     def boot(self, fault_id: str, run_id: str, progress: Progress) -> World:
         from keyhold.console.image import (
             load_golden_info,
@@ -548,7 +555,8 @@ class VmWorlds:
         try:
             progress("Starting a fresh overlay of the test VM with the fault planted.")
             endpoints = vm.start()
-            progress(f"Booting ({vm.accel}). The fault shows after 30 to 90 seconds.")
+            span = "5 to 30 seconds" if vm.accel == "kvm" else "30 to 90 seconds"
+            progress(f"Booting ({vm.accel}). The fault shows after {span}.")
             if vm.wait_for_serial(fault.ready_marker, timeout=self.settings.boot_timeout_s) is None:
                 raise WorldError("the VM did not show the fault in time")
             # The screen can lag the serial marker; the free look must see the whole symptom.

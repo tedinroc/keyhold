@@ -6,7 +6,7 @@
   <p class="lede">Pick a broken server. A fresh copy starts with that fault, the agent takes a free look, and you
     see the quote and the evidence before anything is held.
     {% if settings.simulated %}In this deployment the server is simulated, so a run takes about a minute.{% else %}The
-    VM boots in 30 to 90 seconds.{% endif %}</p>
+    VM boots in {{ boot_span }}.{% endif %}</p>
 </div>
 
 {% if error %}

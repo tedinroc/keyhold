@@ -189,11 +189,12 @@ hold; `prove.py` then placed one by hand, and the agent's `give_up` voided it. I
 input sent before the hold reached the console zero times. Details:
 [docs/REAL_VM.md](docs/REAL_VM.md).
 
-Then the whole loop ran for real: `/try` in live mode with the PayPal sandbox, a test VM and
-Claude Haiku 5.5. A sandbox buyer approved a $9.00 hold with the JS SDK v6 button; the agent fixed
-the sshd typo through the gated console; the probe passed; PayPal captured $9.00 1 minute 48
-seconds after the hold (capture `8WA56714MN162430M`, 8 agent turns, about $0.0034 of model spend).
-Both this run and an earlier one passed all 24 warranty checks. `tools/live_check.py` ran 23 steps
+Then the whole loop ran for real, on the hosted Keyhold: `/try` on the public URL in live mode,
+with the PayPal sandbox, an x86-64 test VM under KVM and Claude Haiku 5.5. A sandbox buyer approved a
+$9.00 hold with the JS SDK v6 button; the agent fixed the sshd typo through the gated console; the
+probe passed twice; PayPal captured $9.00 1 minute 45 seconds after the hold (capture
+`7WP61145AR824644E`, 7 agent turns, about $0.0039 of model spend), and all 24 warranty checks
+passed. Two earlier rescues on a local test VM captured and passed their warranty too. `tools/live_check.py` ran 23 steps
 against the sandbox: 22 passed, none failed, and webhook verification was skipped. IDs, timelines and the two problems the first runs exposed:
 [docs/evidence/](docs/evidence/README.md).
 
@@ -325,12 +326,13 @@ Claude is one part of a rescue and has no way to move money.
 
 ## Honest limits
 
-- **What has run where.** Two full rescues ran against the PayPal sandbox with Claude Haiku 5.5
-  on a test VM, both of the "Typo in sshd_config" fault, and `tools/live_check.py` passed against
-  the sandbox ([docs/evidence/](docs/evidence/README.md)). The other faults have run on real
+- **What has run where.** Three full rescues ran against the PayPal sandbox with Claude Haiku 5.5,
+  all of the "Typo in sshd_config" fault: two on a local test VM and one on the hosted Keyhold
+  (an x86-64 cloud VM with KVM), and `tools/live_check.py` passed against the sandbox
+  ([docs/evidence/](docs/evidence/README.md)). The other faults have run on real
   guests only with `FakePayPal` and a scripted agent (`tools/vm/prove.py`). Claude Opus 5.5 is
   supported but was not used in the live runs. Webhook verification has not run against real
-  deliveries, because the local app has no public URL.
+  deliveries yet.
 - **No hosting provider console.** Keyhold drives a local QEMU guest over QMP. Using a real
   provider's web console needs a `Console` adapter for that provider's API, which does not exist
   yet.
