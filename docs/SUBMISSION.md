@@ -9,7 +9,7 @@ from the deployment, the uploaded film and the public repository. Do not estimat
 | [HOSTED URL], [VIDEO URL], [REPO URL] | the deployment, the uploaded film, the public repository |
 
 The live-run figures come from [docs/evidence/](evidence/README.md). Test counts below are from
-`uv run pytest -q` on 2026-11-08: 1156 collected, 1153 passed, 3 skipped
+`uv run pytest -q` on 2026-11-09: 1162 collected, 1159 passed, 3 skipped
 (they boot real guests). `tests/test_doc_counts.py` fails while these counts, or the ones in the
 README and the judge guide, differ from the suite's.
 
@@ -114,7 +114,7 @@ keystroke firewall refuses destructive commands before they reach the console.
 
 ## Accomplishments that we're proud of
 
-- 1156 tests: 1153 pass, and 3 boot real guests on demand. None reach the network. A stateful
+- 1162 tests: 1159 pass, and 3 boot real guests on demand. None reach the network. A stateful
   property test drives rescues through random PayPal errors, lost answers, crashes, expiry and
   out-of-order webhooks, checking every money invariant after every step. Chaos tests SIGKILL a
   process around the capture and find exactly one capture afterwards.
@@ -132,15 +132,25 @@ keystroke firewall refuses destructive commands before they reach the console.
   $19.00, capture `37X1688089973222U`, 87 seconds, 12 agent turns); and the same fault with the
   owner pressing Stop 6 seconds after the keyboard was lent (authorization `8VN59510G70260907`
   voided a second later, $0 charged, nothing typed after Stop).
-- Webhooks on real deliveries: those three runs received six PayPal deliveries, one out of order
-  (the capture's event before the authorization's), and all six passed
-  `verify-webhook-signature` and were applied.
+- Four more hosted runs recorded from the owner's own browser for the film: two $9.00 captures
+  (the film's is `0JP43729YN445900W`, 97 seconds after the hold) and two Stops. The second Stop
+  (authorization `4XY289162B198180C`) was voided 0.9 seconds after Stop with nothing typed after it.
+- Webhooks on real deliveries: fourteen PayPal deliveries across the seven hosted runs since the
+  webhook was registered, one out of order (a capture's event before its authorization's), and
+  all fourteen passed `verify-webhook-signature` and were applied.
 - `tools/live_check.py` against the sandbox: 22 checks passed, none failed (its webhook step ran
   before the deployment had a public URL; the real deliveries above cover it). It covers a partial capture with `final_capture`, request-id
   replays, a refused second capture, a refused void after capture, a partial refund, a void, and
   four mocked refusals.
 
 ## What we learned
+
+- Recording a real Stop from the owner's browser found a gap no test had: the gate checked the
+  hold once per input, so a long command Claude had started a moment before Stop finished
+  typing, Enter included, 5.7 seconds after it. Now text goes out 8 keys at a time with the hold
+  checked before each batch and before every Enter, so Stop (or a void from anywhere) cuts a
+  command mid-line and it never runs. The page had also said "Nothing was typed after Stop"; it
+  now measures from the moment Stop took the keyboard.
 
 - The first live runs found two problems that every test had missed. The free look answered
   `unknown` for a failed ssh.service because the prompt never said that classes in the same tier
@@ -161,8 +171,8 @@ keystroke firewall refuses destructive commands before they reach the console.
 
 ## Honest limits
 
-- Six live rescues of two faults (four on the hosted Keyhold): five captured, one stopped by the
-  owner and voided. The other faults have run on real guests, under KVM too, only with a
+- Ten live rescues of two faults (eight on the hosted Keyhold): seven captured, three stopped by
+  the owner and voided. The other faults have run on real guests, under KVM too, only with a
   simulated PayPal and a scripted agent.
 - Keyhold drives a local test VM, not a hosting provider's console.
 - On a real screen, Claude's evidence lines are not machine-checked.

@@ -240,6 +240,14 @@ def test_several_test_servers_one_run_per_browser(make_web) -> None:
     assert health["slot"] == "busy" and health["slots"] == {"used": 2, "total": 2}
 
 
+def test_a_run_in_its_warranty_says_why_the_next_one_waits(make_web) -> None:
+    web = make_web(try_slots=2)
+    first = web.start()
+    first.stage = "warranty"  # captured; the warranty re-probes keep its test server up
+    again = web.client.post("/try/start", data={"csrf": web.csrf(), "fault": "fstab-missing-disk"}, follow_redirects=False)
+    assert again.status_code == 409 and "still in its warranty checks" in again.text
+
+
 def test_one_slot_still_says_one_server(make_web) -> None:
     web = make_web()
     assert "One server at a time." in web.client.get("/try").text

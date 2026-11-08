@@ -468,6 +468,21 @@ class HoldRevoked(Exception):
     """
 
 
+class InputCut(HoldRevoked):
+    """The hold ended while text was being typed, and the console stopped sending its keys.
+
+    ``sent`` of ``total`` keys had gone out; ``enter_withheld`` is true when an Enter key in the
+    text was never sent, so the line the agent was typing did not run.
+    """
+
+    def __init__(self, reason: str, *, sent: int, total: int, enter_withheld: bool, enter_sent: bool = False) -> None:
+        super().__init__(reason)
+        self.sent = sent
+        self.total = total
+        self.enter_withheld = enter_withheld
+        self.enter_sent = enter_sent  # an earlier line in the text had already been entered
+
+
 @runtime_checkable
 class Console(Protocol):
     """A server's web console: a screen and a keyboard. Re-exported by ``keyhold.console.base``.
@@ -481,7 +496,7 @@ class Console(Protocol):
         """PNG bytes of the current screen."""
         ...
 
-    def type_text(self, text: str) -> None: ...
+    def type_text(self, text: str, abort: Callable[[], bool] | None = None) -> None: ...
 
     def press(self, keys: list[str]) -> None: ...
 

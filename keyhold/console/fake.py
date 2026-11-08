@@ -37,6 +37,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 
 from keyhold.console.base import ConsoleClosed, char_for_chord, normalize_chord, text_to_chords
+from keyhold.types import InputCut
 
 __all__ = ["FakeConsole", "Screen", "Rule", "InputRecord", "render_text_png"]
 
@@ -208,13 +209,21 @@ class FakeConsole:
             return screen.png
         return render_text_png(self.visible_lines(), self.size)
 
-    def type_text(self, text: str) -> None:
+    def type_text(self, text: str, abort: Callable[[], bool] | None = None) -> None:
+        """Type ``text``. With ``abort``, ask it before every key, like the QEMU console asks it
+        before every batch and before every Enter; on yes the rest is not typed and ``InputCut``
+        is raised (an Enter that was not reached never runs the line)."""
         self._check("type_text")
         if not isinstance(text, str):
             raise TypeError("type_text takes a string")
         chords = text_to_chords(text)  # raises UnsupportedText before anything is recorded
-        self._record(InputRecord("type", text, self.screen))
-        for chord in chords:
+        for i, chord in enumerate(chords):
+            if abort is not None and abort():
+                if i:  # the text was recorded whole before its first key; note where it was cut
+                    self.inputs.append(InputRecord("cut", i, self.screen))
+                raise InputCut("the hold ended while typing", sent=i, total=len(chords), enter_withheld=["ret"] in chords[i:], enter_sent=["ret"] in chords[:i])
+            if i == 0:
+                self._record(InputRecord("type", text, self.screen))
             if chord == ["ret"]:
                 self._enter()
             else:

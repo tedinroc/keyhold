@@ -177,6 +177,17 @@ def _sentence(text: str) -> str:
 # --------------------------------------------------------------------------------------------
 
 
+def stop_note(f: "Facts") -> str:
+    """One sentence on what the keyboard did around Stop, from the ledger."""
+    if f.cut_input and not f.typed_after_stop:
+        if f.cut_input.get("enter_withheld"):
+            return "Stop cut the line being typed: its Enter key was never sent, so it did not run."
+        return "Stop cut the text being typed; the rest of its keys were never sent."
+    if f.typed_after_stop:
+        return "One input that was already being sent when Stop arrived finished after it; nothing was sent after that."
+    return "Nothing was typed after Stop."
+
+
 @dataclass
 class Facts:
     """What the event log says happened, counted once for every view below."""
@@ -191,7 +202,16 @@ class Facts:
     revoked_at: float | None = None
     revoked_reason: str = ""
     stop_at: float | None = None
-    typed_after_stop: bool = False
+    typed_after_stop: bool = False  # an input finished after the keyboard was taken back
+    cut_input: dict[str, Any] | None = None  # the input Stop cut short (keys sent, Enter withheld)
+
+    @property
+    def stop_pressed_at(self) -> float | None:
+        """When Stop took the keyboard: the revoke it caused, or the stop event when the keyboard had
+        already been locked for another reason (the agent finished, then Stop came while probing)."""
+        if self.revoked_at is not None and "pressed Stop" in self.revoked_reason:
+            return self.revoked_at
+        return self.stop_at
     agent_turns: int | None = None
     agent_outcome: str | None = None
     agent_reason: str = ""
@@ -234,8 +254,15 @@ class Facts:
             elif kind == "stop" and f.stop_at is None:
                 f.stop_at = at
             elif kind in ("agent_type", "agent_key"):
-                if f.stop_at is not None and at > f.stop_at:
+                # measured from the moment the lease was revoked (Stop pressed), not from the
+                # later "stop" event, which is written once an input in flight has ended
+                taken = f.stop_pressed_at
+                if taken is not None and at > taken:
                     f.typed_after_stop = True
+            elif kind == "agent_type_cut" and f.cut_input is None:
+                if data.get("sent") != 0:  # a cut before the first key typed nothing at all
+                    f.cut_input = {"sent": data.get("sent"), "total": data.get("total"),
+                                   "enter_withheld": bool(data.get("enter_withheld"))}
             elif kind == "agent_result":
                 f.agent_turns = data.get("turns")
                 f.agent_outcome = data.get("outcome")
@@ -742,9 +769,11 @@ def progress_view(
         pressed = f"{w['you']} pressed Stop"
         steps = [quote_step, released, _step("keyboard", "done", pressed), _step("probe", "skipped", "after Stop")]
         sub = f"Keyboard locked at {hms(f.revoked_at or f.stop_at)} UTC, hold voided."
-        if not f.typed_after_stop:
-            sub += " Nothing was typed after Stop."
+        sub += " " + stop_note(f)
+        if not f.typed_after_stop and not f.cut_input:
             vstats.append({"value": "0", "label": "keys after Stop"})
+        elif not f.typed_after_stop and f.cut_input and f.cut_input.get("enter_withheld"):
+            vstats.append({"value": "0", "label": "commands run after Stop"})
         return _pack(
             "decided", code, steps, _outcome("voided", "Voided · $0", pressed),
             _status("Stopped. $0 charged.", xl=True, sub=sub),
@@ -1165,8 +1194,8 @@ def tale_view(rec: Any, events: Iterable[Any], *, title: str, agent: str = "The 
     turns = f"{f.agent_turns} turn{'' if f.agent_turns == 1 else 's'}" if f.agent_turns else "a while"
     if f.stop_at is not None:
         add(f.revoked_at or f.stop_at, "i-key", "Keyboard: lent, then taken back",
-            f"{w['You']} pressed Stop at {hms(f.stop_at)}. The keyboard locked before the void was sent."
-            + ("" if f.typed_after_stop else " Nothing was typed after Stop."), held_span=True)
+            f"{w['You']} pressed Stop at {hms(f.stop_pressed_at)}. The keyboard locked before the void was sent. "
+            + stop_note(f), held_span=True)
     elif f.revoked_at is not None:
         add(f.revoked_at, "i-key", "Keyboard: lent, then locked",
             f"{agent} typed for {turns} while PayPal said the hold was live. "

@@ -32,6 +32,8 @@ container is removed by name even when a step fails.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import argparse
 import contextlib
 import json
@@ -87,8 +89,8 @@ class CountingConsole:
     def screenshot(self) -> bytes:
         return self._console.screenshot()
 
-    def type_text(self, text: str) -> None:
-        self._console.type_text(text)
+    def type_text(self, text: str, abort: Callable[[], bool] | None = None) -> None:
+        self._console.type_text(text, abort=abort)
         self.inputs.append(("type", time.time()))
 
     def press(self, keys: list[str]) -> None:

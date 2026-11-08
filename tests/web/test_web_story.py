@@ -17,7 +17,7 @@ from test_web_status import read_stream, sse_events, wait_for
 from keyhold.probe.owner import WarrantyPlan
 from keyhold.types import RescueState
 from web.runs import ThumbStore
-from web.story import KeyMoments, hms, progress_view, run_progress, visible_moments
+from web.story import KeyMoments, hms, progress_view, run_progress, tale_view, visible_moments
 from web.views import thumb_crop
 
 T0 = 1_794_000_000.0  # 2026-11-07, any fixed time
@@ -134,6 +134,28 @@ def test_progress_words_for_the_judge_path() -> None:
     assert "Nothing was typed after Stop." in stopped["status"]["sub"]
     late = progress_view(rec("VOIDED", end_reason="the owner pressed Stop"), [*stop_events, ev("agent_type", 10, text="x")])
     assert "Nothing was typed after Stop." not in late["status"]["sub"]
+    # the hosted run of 2026-11-08 20:11: Stop at 9, a line already being typed finished at 14, and
+    # the "stop" event was written after it. The page must not claim nothing was typed.
+    inflight = [*HOLD, ev("gate_revoked", 9, "the owner pressed Stop"), ev("agent_type", 14, text="cp a b\n"),
+                ev("stop", 14.1), ev("state", 15, to="VOIDED")]
+    real = progress_view(rec("VOIDED", end_reason="the owner pressed Stop"), inflight)
+    assert "Nothing was typed after Stop." not in real["status"]["sub"]
+    assert "finished after it" in real["status"]["sub"]
+    assert {"value": "0", "label": "keys after Stop"} not in real["money"]["stats"]
+    assert {"value": "0", "label": "keys after Stop"} in stopped["money"]["stats"]
+    # Stop pressed while the probe ran: the keyboard was already locked (agent done) and the page
+    # gives the time Stop was pressed, not the earlier lock
+    probing_stop = [*DONE, ev("probe", 21, at=T0 + 21, ok=True), ev("stop", 40), ev("state", 41, to="VOIDED")]
+    tale = tale_view(rec("VOIDED", end_reason="the owner pressed Stop"), probing_stop, title="Typo")
+    row = next(r for r in tale if r["title"] == "Keyboard: lent, then taken back")
+    assert f"pressed Stop at {hms(T0 + 40)}" in row["text"] and hms(T0 + 20) not in row["text"]
+    # the fixed gate: Stop cuts the line being typed and its Enter never goes out
+    cut = [*HOLD, ev("gate_revoked", 9, "the owner pressed Stop"),
+           ev("agent_type_cut", 9.2, "cut", sent=8, total=40, enter_withheld=True), ev("stop", 9.3), ev("state", 10, to="VOIDED")]
+    cutv = progress_view(rec("VOIDED", end_reason="the owner pressed Stop"), cut)
+    assert "its Enter key was never sent, so it did not run." in cutv["status"]["sub"]
+    assert "Nothing was typed after Stop." not in cutv["status"]["sub"]
+    assert {"value": "0", "label": "commands run after Stop"} in cutv["money"]["stats"]
 
     # Cancel before a hold never says "VOIDED" or "pressed Stop", and never ticks Hold.
     cancelled = progress_view(rec("VOIDED", authorization_id=None, end_reason="the owner pressed Stop"), [ev("quoted", 0)])

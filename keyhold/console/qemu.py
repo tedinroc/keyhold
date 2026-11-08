@@ -42,6 +42,10 @@ from typing import Any
 from keyhold.console.base import ConsoleClosed, ConsoleError, normalize_chord, text_to_chords
 from keyhold.console.docker import GUEST_ARCHES, LOOPBACK, DockerError, DockerRunner
 from keyhold.console.qmp import QMPClient, QMPConnectionError, QMPError
+from keyhold.types import InputCut
+
+CUT_BATCH = 8  # keys sent between two abort checks when typing under a hold
+ENTER = ["ret"]
 
 __all__ = [
     "FIRMWARE",
@@ -283,16 +287,43 @@ class QemuConsole:
             raise ConsoleError(f"screendump failed: {exc.desc}") from exc
         return self._take(name, png=False)
 
-    def type_text(self, text: str) -> None:
+    def type_text(self, text: str, abort: Callable[[], bool] | None = None) -> None:
+        """Type ``text``. With ``abort`` (the gated console passes "is the hold gone?"), keys go out
+        in batches of at most ``CUT_BATCH`` and ``abort()`` is asked before every batch; an Enter
+        goes out on its own, only after the keys before it have played and ``abort()`` said no.
+        When ``abort()`` says yes the rest is never sent and ``InputCut`` is raised."""
         self._check_open()
         if not isinstance(text, str):
             raise TypeError("type_text takes a string")
         chords = text_to_chords(text)  # validates everything before the first key goes out
-        for start in range(0, len(chords), self._chunk):
-            batch = chords[start : start + self._chunk]
-            for chord in batch:
-                self._send_chord(chord)
-            self._sleep(self._play_time(batch))
+        if abort is None:
+            for start in range(0, len(chords), self._chunk):
+                batch = chords[start : start + self._chunk]
+                for chord in batch:
+                    self._send_chord(chord)
+                self._sleep(self._play_time(batch))
+        else:
+            size, sent = min(self._chunk, CUT_BATCH), 0
+            while sent < len(chords):
+                if chords[sent] == ENTER:
+                    batch = [ENTER]
+                else:
+                    end = sent
+                    while end < len(chords) and end - sent < size and chords[end] != ENTER:
+                        end += 1
+                    batch = chords[sent:end]
+                if abort():
+                    raise InputCut(
+                        "the hold ended while typing",
+                        sent=sent,
+                        total=len(chords),
+                        enter_withheld=ENTER in chords[sent:],
+                        enter_sent=ENTER in chords[:sent],
+                    )
+                for chord in batch:
+                    self._send_chord(chord)
+                self._sleep(self._play_time(batch))
+                sent += len(batch)
         if chords:
             self._sleep(self._settle)
 

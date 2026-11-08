@@ -149,8 +149,8 @@ class SimulatedConsole:
     def screen_text(self) -> str:
         return "\n".join(self.fake.visible_lines())
 
-    def type_text(self, text: str) -> None:
-        self.fake.type_text(text)
+    def type_text(self, text: str, abort: Callable[[], bool] | None = None) -> None:
+        self.fake.type_text(text, abort=abort)
         self._settle()
 
     def press(self, keys: list[str]) -> None:

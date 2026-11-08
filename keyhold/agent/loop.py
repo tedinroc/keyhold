@@ -36,6 +36,7 @@ from keyhold.agent.firewall import KeystrokeFirewall
 from keyhold.agent.keys import format_combo, parse_combo
 from keyhold.agent.model import MODEL_ID, ModelUnavailable, fit_png, thinking_text, tool_uses
 from keyhold.types import (
+    InputCut,
     AgentEvent,
     AgentOutcome,
     AgentResult,
@@ -324,6 +325,19 @@ class _Run:
             return f"Refused by the keystroke firewall ({verdict.rule}): {verdict.reason} Nothing was typed.", True
         try:
             self.console.type_text(text)
+        except InputCut as exc:
+            secret = any(s in text for s in self.secrets)
+            counts = {} if secret else {"sent": exc.sent, "total": exc.total}
+            head = ("The hold ended while this was typed; the rest of it never went out."
+                    if secret else f"The hold ended while this was typed: {exc.sent} of {exc.total} keys went out and the rest never did.")
+            if exc.enter_withheld:
+                tail = " Its Enter key was never sent, so the line did not run."
+            elif exc.enter_sent:
+                tail = " An earlier line in it had already been entered."
+            else:
+                tail = " The text had no Enter key, so nothing was entered."
+            self.emit("type_cut", head + tail, text=text, enter_withheld=exc.enter_withheld, enter_sent=exc.enter_sent, **counts)
+            raise
         except HoldRevoked:
             raise
         except Exception as exc:

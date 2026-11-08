@@ -238,8 +238,16 @@ def test_owner_stop_mid_run_voids_and_cuts_input_at_once(orch, ledger, fake) -> 
     assert results and results[0].voided and results[0].state is RescueState.VOIDED
     assert report.agent.outcome is AgentOutcome.REVOKED
     assert_voided(ledger, fake, rec.id, OWNER_STOP)
-    # The input being sent when Stop arrived finished; nothing after it reached the console.
-    assert [r.value for r in world.console.inputs] == ["root\n", CONSOLE_PASSWORD + "\n"]
+    # Stop landed while the password was being typed: the rest of it, its Enter included,
+    # never reached the console, and nothing after it did.
+    inputs = world.console.inputs
+    assert [r.value for r in inputs[:2]] == ["root\n", CONSOLE_PASSWORD + "\n"]
+    assert [r.kind for r in inputs[2:]] == ["cut"] and inputs[2].value < len(CONSOLE_PASSWORD) + 1
+    cut = ledger.events(rec.id, kind="agent_type_cut")
+    assert len(cut) == 1 and cut[0].data["enter_withheld"] is True
+    assert CONSOLE_PASSWORD not in cut[0].detail and CONSOLE_PASSWORD not in str(cut[0].data)
+    assert "sent" not in cut[0].data and "total" not in cut[0].data  # key counts would give the password's length
+    assert "never sent" in cut[0].detail
     assert not world.server.ssh_up
 
 

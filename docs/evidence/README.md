@@ -1,8 +1,8 @@
 # Live runs (2026-11-07 and 11-08, UTC)
 
-Seven runs against the real PayPal sandbox: the money check, five rescues that captured and one
-that the owner stopped. Every ID below can be looked up in the sandbox business account that
-owns the REST app. Money is sandbox money.
+Eleven runs against the real PayPal sandbox: the money check, seven rescues that captured and
+three that the owner stopped. Every ID below can be looked up in the sandbox business account
+that owns the REST app. Money is sandbox money.
 
 | File | What ran | Result |
 |---|---|---|
@@ -14,10 +14,37 @@ owns the REST app. Money is sandbox money.
 | [rescue-hosted-a19567da.md](rescue-hosted-a19567da.md) | hosted: "fstab lists a disk that is gone", the T2 fault | captured $19.00 (capture `37X1688089973222U`) 87 s after the hold; 12 agent turns; about $0.0051 of model spend; warranty 6 checks of 6 passed; 2 webhooks verified |
 | [rescue-hosted-a44702f2.md](rescue-hosted-a44702f2.md) | hosted: the same fault, and the owner pressed **Stop** 6 s after the keyboard was lent | authorization `8VN59510G70260907` voided 1 s after Stop; $0 charged; the agent's only input was the console password, and nothing was typed after Stop; 2 webhooks verified, the second one `PAYMENT.AUTHORIZATION.VOIDED` |
 
+| [rescue-hosted-e1d7502e.md](rescue-hosted-e1d7502e.md) | hosted, recorded from the owner's own browser: "Typo in sshd_config" | captured $9.00 (capture `4EU4081387193880G`) 76 s after the hold; warranty 6 of 6; 2 webhooks verified |
+| [rescue-hosted-bf5a2f31.md](rescue-hosted-bf5a2f31.md) | the same, the run shown in the film: PayPal's own approval window, then Claude at the console | captured $9.00 (capture `0JP43729YN445900W`) 97 s after the hold; 8 agent turns; warranty 6 of 6; 2 webhooks verified |
+| [rescue-hosted-9c26b96a.md](rescue-hosted-9c26b96a.md) | hosted: "fstab lists a disk that is gone", Stop pressed while Claude was typing a command | voided, $0 charged, but **a command already being typed finished after Stop**; see "What the Stop runs showed" below |
+| [rescue-hosted-23ed2251.md](rescue-hosted-23ed2251.md) | the same fault after the fix, the Stop shown in the film | authorization `4XY289162B198180C` voided 0.9 s after Stop; $0 charged; nothing typed after Stop; 2 webhooks verified |
+
+## What the Stop runs showed, and what changed
+
+The first Stop recorded from the owner's browser (9c26b96a) found a real gap. The gate checked
+the hold once per input, and QEMU sends a typed text in batches of 40 keys. Claude had started
+typing a 140-character command (`cp /etc/fstab … ; cat /etc/fstab ; journalctl …`) a moment
+before Stop. `revoke()` correctly waited for the input in flight, but that input was the whole
+command, so its keys and its Enter went out over the next 5.7 seconds and it ran (a backup copy
+and two read-only looks; nothing was changed). The page then said "Nothing was typed after
+Stop", because it measured from the later `stop` event.
+
+The fix: text under a hold now goes out in batches of at most 8 keys, each sent only after
+`HoldLease.cut_now()` says the hold is still live (the Stop flag, and the ledger for a void or
+capture started anywhere), and an Enter goes out on its own after one more check. A Stop or void
+that lands mid-command cuts it, and the line is not entered (`InputCut`, logged as
+`agent_type_cut`). The page now measures from the moment the lease was revoked, so 9c26b96a's own
+page now says that one input that was already being sent finished after Stop. An independent
+review of the fix raced Stop against typing 40 times: Stop waited at most 0.11 s and no key went
+out after it. In the run after the fix (23ed2251) the hold was voided 0.9 s after Stop and
+nothing was typed after it.
+
 ## Webhooks on real deliveries
 
 The webhook was registered for the hosted URL with `tools/register_webhook.py` (ten event types)
-and `PAYPAL_WEBHOOK_ID` set on the deployment. The three runs above received six deliveries:
+and `PAYPAL_WEBHOOK_ID` set on the deployment. The seven hosted runs since then received fourteen
+deliveries, and all fourteen passed `verify-webhook-signature` and were applied. The first three
+runs received six:
 `PAYMENT.AUTHORIZATION.CREATED` three times, `PAYMENT.CAPTURE.COMPLETED` twice and
 `PAYMENT.AUTHORIZATION.VOIDED` once. All six passed `verify-webhook-signature` and were applied.
 One arrived out of order: in run 8cf5a71c PayPal delivered the capture's event 6 s before the

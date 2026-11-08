@@ -12,7 +12,7 @@ from pay_helpers import new_rescue, to_held
 from keyhold.console.fake import FakeConsole, Screen
 from keyhold.pay.client import FakePayPal, fake_error
 from keyhold.pay.gate import GatedConsole, HoldLease
-from keyhold.types import HoldRevoked, RescueState, Tier
+from keyhold.types import HoldRevoked, InputCut, RescueState, Tier
 
 
 class TamperedGateway:
@@ -298,7 +298,15 @@ def test_revoke_waits_for_the_input_in_flight_and_blocks_the_next(ledger, pay, f
             assert release.wait(5)
 
     inner.on_input(slow)
-    worker = threading.Thread(target=gated.type_text, args=("slow\n",))
+    raised: list[BaseException] = []
+
+    def send() -> None:
+        try:
+            gated.type_text("slow\n")
+        except HoldRevoked as exc:
+            raised.append(exc)
+
+    worker = threading.Thread(target=send)
     worker.start()
     assert sending.wait(5)
 
@@ -314,4 +322,39 @@ def test_revoke_waits_for_the_input_in_flight_and_blocks_the_next(ledger, pay, f
     assert revoked.is_set()
     with pytest.raises(HoldRevoked):
         gated.type_text("after\n")
-    assert [r.value for r in inner.inputs] == ["slow\n"]
+    # the input in flight was cut at its next key: its Enter never went out
+    assert len(raised) == 1 and isinstance(raised[0], InputCut) and raised[0].enter_withheld
+    assert [(r.kind, r.value) for r in inner.inputs] == [("type", "slow\n"), ("cut", 1)]
+
+
+def test_a_void_that_lands_mid_text_cuts_the_rest_of_it(ledger, pay, fake, clock) -> None:
+    # not only Stop: a void started anywhere (webhook, reconciler, Payments.void) shows in the
+    # ledger, and typing stops at its next key with the Enter never sent
+    rec = to_held(ledger, pay, fake)
+    gated = GatedConsole(console(), lease_for(ledger, fake, rec, clock))
+    inner = gated._console
+
+    def void_now(record) -> None:
+        if record.kind == "type":
+            pay.void(rec.id, "voided elsewhere")
+
+    inner.on_input(void_now)
+    with pytest.raises(InputCut) as cut:
+        gated.type_text("systemctl restart ssh\n")
+    assert cut.value.enter_withheld and not cut.value.enter_sent
+    assert [r.kind for r in inner.inputs] == ["type", "cut"]
+    assert "released" in str(cut.value) or "VOID" in str(cut.value).upper()
+
+
+def test_the_qemu_console_is_cut_mid_text() -> None:
+    from keyhold.console.qemu import QemuConsole
+
+    class Lease:
+        revoked = False
+        reason = None
+
+        def require(self) -> None: ...
+
+    gated = GatedConsole.__new__(GatedConsole)
+    GatedConsole.__init__(gated, QemuConsole.__new__(QemuConsole), Lease())
+    assert gated._abortable  # a rename of the abort parameter would silently lose the cut

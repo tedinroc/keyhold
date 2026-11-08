@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from keyhold.types import InputCut
 from console_fakes import QMPCommandError
 from PIL import Image
 
@@ -154,6 +156,43 @@ def test_type_text_paces_long_text_in_chunks(console_setup) -> None:
     console.type_text("a" * 100)
     assert len(_sent_keys(server)) == 100
     assert len(sleeps.calls) == 4  # chunks of 40, 40, 20 and the settle
+
+
+def test_type_text_under_a_hold_checks_between_small_batches_and_sends_enter_alone(console_setup) -> None:
+    console, server, sleeps, _, _ = console_setup
+    asked: list[int] = []
+    console.type_text("a" * 20 + "\n", abort=lambda: asked.append(len(_sent_keys(server))) or False)
+    keys = _sent_keys(server)
+    assert len(keys) == 21 and keys[-1] == ["ret"]
+    assert asked == [0, 8, 16, 20]  # before each batch of at most 8, and before the Enter on its own
+
+
+def test_type_text_stops_at_the_next_batch_and_never_sends_enter_after_stop(console_setup) -> None:
+    console, server, *_ = console_setup
+    calls = {"n": 0}
+
+    def abort() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1  # Stop lands while the first batch is being played
+
+    with pytest.raises(InputCut) as cut:
+        console.type_text("rm -rf /srv/data\n", abort=abort)
+    keys = _sent_keys(server)
+    assert len(keys) == 8 and ["ret"] not in keys
+    assert cut.value.sent == 8 and cut.value.total == 17 and cut.value.enter_withheld
+
+
+def test_type_text_checks_right_before_the_enter(console_setup) -> None:
+    console, server, *_ = console_setup
+    state = {"n": 0}
+
+    def abort() -> bool:  # live through the text, gone when only the Enter is left
+        state["n"] += 1
+        return state["n"] == 2
+
+    with pytest.raises(InputCut) as cut:
+        console.type_text("ls\n", abort=abort)
+    assert _sent_keys(server) == [["l"], ["s"]] and cut.value.enter_withheld
 
 
 def test_type_text_refuses_bad_text_before_sending(console_setup) -> None:

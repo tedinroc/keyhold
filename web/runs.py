@@ -486,6 +486,13 @@ class RunManager:
         with self._lock:
             mine = [r for r in self._runs.values() if r.owner == owner and r.active and r.id in self._slots]
             if mine:
+                if all(r.stage == "warranty" for r in mine):
+                    raise TryRefused(
+                        "own_run",
+                        "Your last run is still in its warranty checks, which keep its test server up. "
+                        "Start the next run when they finish (the run page shows the count).",
+                        409,
+                    )
                 raise TryRefused("own_run", "This browser already has a run in progress; finish or cancel it first.", 409)
             if len(self._slots) >= self.slot_count:
                 raise TryRefused("busy", self.slot_message(), 409)

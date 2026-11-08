@@ -25,13 +25,19 @@ CREATED, a missing authorization, a PayPal error that persists after ``retries``
 (a 429 throttle is retried like a 5xx, waiting out a short Retry-After), or an unexpected
 exception. A revoked lease never grants again.
 
-Stop within one action. ``revoke()`` marks the lease revoked at once, then waits for an input
-that is already being sent to finish. When it returns, nothing more can reach the console
-through any ``GatedConsole`` on this lease: input is sent while holding the lease's input lock,
-and the revoked mark is checked inside that lock.
+Stop within a few keys. ``revoke()`` marks the lease revoked at once, then waits for the input
+being sent to end. Text goes out in batches of at most 8 keys with ``cut_now()`` asked before
+each batch and an Enter only after one more ask, so that input ends at its next batch with its
+Enter unsent (``InputCut``). When ``revoke()`` returns, nothing more can reach the console through
+any ``GatedConsole`` on this lease: input is sent while holding the lease's input lock, and the
+revoked mark is checked inside that lock. ``cut_now()`` also sees a void or capture that started
+elsewhere (the ledger) and the time limit, without calling PayPal.
 """
 
 from __future__ import annotations
+
+import inspect
+import logging
 
 import threading
 from collections.abc import Iterator
@@ -44,6 +50,7 @@ from keyhold.types import (
     Clock,
     Console,
     HoldRevoked,
+    InputCut,
     Lease,
     MoneyOp,
     PaymentGateway,
@@ -52,6 +59,8 @@ from keyhold.types import (
     SystemClock,
     money,
 )
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_CHECK_EVERY",
@@ -163,12 +172,27 @@ class HoldLease:
             assert self._auth is not None
             return self._auth
 
+    def cut_now(self) -> bool:
+        """Should text being typed stop at its next key? True once the lease is revoked, and also
+        when the ledger already shows the hold going away (a void or capture started, a state or
+        authorization status that lends no keyboard) or the time limit passed. No PayPal call:
+        it runs between batches of keys, so it must be cheap."""
+        if self._revoked.is_set():
+            return True
+        try:
+            if self.deadline is not None and self.clock.now() >= self.deadline:
+                self._revoke("the rescue time limit was reached")
+            self._local_checks()
+        except HoldRevoked:
+            return True
+        return self._revoked.is_set()
+
     @contextmanager
     def input_window(self) -> Iterator[None]:
         """Hold the input lock, check the lease, and let exactly one input through.
 
         ``revoke()`` waits for an open window to close, so after it returns no input that was
-        not already being sent can reach the console.
+        not already being sent can reach the console (and one being sent is cut at its next key batch).
         """
         with self._input_lock:
             self.require()
@@ -176,7 +200,7 @@ class HoldLease:
 
     def revoke(self, reason: str, *, wait: bool = True) -> None:
         """End the session: no input from now on. With ``wait`` (the default), return only
-        after any input already being sent has finished. Revoking twice keeps the first reason."""
+        after the input being sent has ended (cut at its next key batch). Revoking twice keeps the first reason."""
         self._revoke(reason, raise_after=False)
         if wait:
             with self._input_lock:
@@ -327,6 +351,13 @@ class GatedConsole:
         self._closed = False
         self.inputs_sent = 0
         self.inputs_refused = 0
+        try:  # consoles that can stop mid-text take an ``abort`` check
+            self._abortable = "abort" in inspect.signature(console.type_text).parameters
+        except (TypeError, ValueError):
+            self._abortable = False
+        if not self._abortable:
+            log.warning("%s cannot stop mid-text: a Stop that lands while it types takes effect after the input",
+                        type(console).__name__)
 
     @property
     def lease(self) -> Lease:
@@ -347,9 +378,25 @@ class GatedConsole:
         return reader()
 
     def type_text(self, text: str) -> None:
+        """Type under the lease. The wrapped console is asked to check the lease between keys
+        (``abort``), so a Stop or a void that lands mid-text stops the rest of it, Enter included."""
         with self._gate():
-            self._console.type_text(text)
+            if self._abortable:
+                try:
+                    self._console.type_text(text, abort=self._cut_check)
+                except InputCut as cut:  # report the lease's own reason, not the console's
+                    reason = getattr(self._lease, "reason", None) or str(cut)
+                    raise InputCut(reason, sent=cut.sent, total=cut.total, enter_withheld=cut.enter_withheld,
+                                   enter_sent=cut.enter_sent) from cut
+            else:
+                self._console.type_text(text)
             self.inputs_sent += 1
+
+    def _cut_check(self) -> bool:
+        check = getattr(self._lease, "cut_now", None)
+        if callable(check):
+            return bool(check())
+        return bool(getattr(self._lease, "revoked", False))
 
     def press(self, keys: list[str]) -> None:
         with self._gate():

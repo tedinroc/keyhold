@@ -32,8 +32,8 @@ written first and a deterministic request id. Nothing here retries a money call 
 a retryable PayPal error is retried a few times with the same id, and if it persists the outbox
 row stays PENDING for the reconciler.
 
-``stop`` revokes the lease first (input is cut; an input already being sent finishes, nothing
-after it gets through) and then voids. Stop and the capture decision take the same per-rescue
+``stop`` revokes the lease first (input is cut: text being typed stops at its next batch of at
+most 8 keys and its Enter is not sent; nothing after it gets through) and then voids. Stop and the capture decision take the same per-rescue
 lock, so exactly one of them wins: a Stop before the capture voids, a Stop after it cannot.
 
 Faults the free look can see are unfixable from the console (for example a password-protected
@@ -197,13 +197,21 @@ class _Session:
     stop_reason: str | None = None
 
 
+def _escaped(text: str) -> str:
+    """The form ``keyhold.agent.loop`` shows typed text in."""
+    return text.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
 def redact(value: Any, secrets: Iterable[str]) -> Any:
     """``value`` with every secret string replaced, through dicts, lists and tuples."""
     secrets = [s for s in secrets if s]
     if not secrets:
         return value
     if isinstance(value, str):
-        for secret in secrets:
+        # events show typed text escaped (``\\`` for a backslash, ``\t`` for a tab), so the escaped
+        # form of a secret is replaced too; longest first, so no part of one survives another
+        forms = {s for secret in secrets for s in (secret, _escaped(secret))}
+        for secret in sorted(forms, key=len, reverse=True):
             value = value.replace(secret, "[console password]")
         return value
     if isinstance(value, dict):
@@ -593,7 +601,7 @@ class Orchestrator:
         if session is not None:
             session.stop_reason = session.stop_reason or reason
             session.stop.set()
-            session.lease.revoke(reason)  # waits for an input already being sent
+            session.lease.revoke(reason)  # waits for the input being sent, which is cut at its next key batch
         self.ledger.log(rescue_id, "stop", reason, {"session": session is not None})
         voided = self._void(rescue_id, reason)
         rec = self.ledger.get(rescue_id)

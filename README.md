@@ -32,8 +32,11 @@ Judges: the testing steps are in [docs/JUDGES.md](docs/JUDGES.md).
    PayPal again every 5 inputs and whenever its last answer is older than 15 seconds, and treats an
    authorization within 120 seconds of its expiry as expired. A voided, expired or missing
    authorization, a PayPal error that persists after retries, or the owner's Stop ends the session
-   with `HoldRevoked`. Stop takes the keyboard first (an input already being sent finishes,
-   nothing after it gets through) and then voids. Screenshots are always allowed.
+   with `HoldRevoked`. Stop takes the keyboard first and then voids. Text goes out in batches
+   of at most 8 keys, each sent only after a check that the hold is still live (the Stop flag, and
+   the ledger for a void or capture started elsewhere), and an Enter goes out on its own after one
+   more check. A Stop or void that lands mid-command cuts it at its next batch, and the line is
+   not entered. Screenshots are always allowed.
 5. **Capture only on the owner probe.** After the agent calls `finished`, the probe must pass twice
    (SSH login with the hidden key and the page content matches), at least 30 seconds apart, with
    no failed probe between. Only then does Keyhold capture the quote (or less) with
@@ -164,7 +167,7 @@ system_reset). `keyhold/console/fake.py` is a scripted console for tests and the
 
 ## Invariants and how they are tested
 
-`uv run pytest -q` collects 1156 tests: 1153 pass and 3 are skipped by default (they boot real
+`uv run pytest -q` collects 1162 tests: 1159 pass and 3 are skipped by default (they boot real
 guests; see "Run it locally"). The tests make no network calls: a fixture refuses any socket
 connection that is not to the loopback address and removes `PAYPAL_*`, `ANTHROPIC_*` and
 `KEYHOLD_*` variables from the environment.
@@ -177,7 +180,7 @@ connection that is not to the loopback address and removes `PAYPAL_*`, `ANTHROPI
 | never void after capture | ledger guard, capture read-back | 7: 1 ledger, 1 FakePayPal, 4 end-to-end, 1 webhook |
 | refund ≤ captured | `Payments.refund`, ledger guard | 7: a property test (up to 60 examples), 1 FakePayPal, 2 ledger, 3 for partial and racing refunds |
 | no keystroke reaches the console unless the lease saw CREATED for this rescue | `HoldLease`, `GatedConsole` | 19: 17 gate (9 of them refuse a hold that is below the quote, VOIDED, PENDING, CAPTURED, expired, or for another authorization, order, probe spec or rescue), 2 end-to-end |
-| a revoked lease stops input within one action | lease input lock, ledger checks on every input | 12: 8 gate (one races a Stop against an input being sent), 4 end-to-end |
+| a revoked lease stops input within one action, and mid-text within 8 keys with its Enter withheld | lease input lock, ledger checks on every input, `abort` checks between key batches | 17: 10 gate (one races a Stop against an input being sent, one voids mid-text), 3 QEMU console, 4 end-to-end |
 | replaying a money operation with its request id is a no-op | outbox, `PayPal-Request-Id` | 9: a property test (up to 60 examples), 2 FakePayPal, 3 ledger, 1 client, 1 end-to-end, 1 reconciler |
 | webhook replays never change state | event-id claim, state ranks | 11: a property test (up to 60 examples), 6 webhook, 2 end-to-end, 2 ledger |
 | a crash between the outbox write and the PayPal response ends in exactly one capture | outbox, reconciler replay | 14: 7 chaos tests that SIGKILL a child process around the capture (one is the no-kill control), a property test (up to 40 examples), 2 reconciler, 2 end-to-end, 1 ledger, 1 webhook |
@@ -206,7 +209,11 @@ sshd typo again (captured $9.00 80 seconds after the hold), the T2 fault "fstab 
 is gone" (captured $19.00 after 87 seconds, 12 agent turns), and the same fault with the owner
 pressing **Stop** 6 seconds after the keyboard was lent: the hold was voided a second later, $0
 was charged and nothing was typed after Stop. Those three runs received six PayPal webhook
-deliveries, one of them out of order, and all six passed `verify-webhook-signature`. Two earlier
+deliveries, one of them out of order, and all six passed `verify-webhook-signature`. Four more
+hosted runs were recorded from the owner's own browser for the film; the first Stop among them
+caught a command that was already being typed finishing after Stop, which is fixed (Stop now cuts
+typing mid-command and the line is not entered; [docs/evidence/](docs/evidence/README.md)
+explains). All fourteen webhook deliveries so far passed verification. Two earlier
 rescues on a local test VM captured and passed their warranty too. `tools/live_check.py` ran 23
 steps against the sandbox: 22 passed and none failed. IDs, timelines and the two problems the
 first runs exposed: [docs/evidence/](docs/evidence/README.md).
@@ -341,11 +348,11 @@ Claude is one part of a rescue and has no way to move money.
 
 ## Honest limits
 
-- **What has run where.** Six rescues ran against the PayPal sandbox with Claude Haiku 5.5: two
-  on a local test VM and four on the hosted Keyhold (an x86-64 cloud VM with KVM). They covered
-  two faults, "Typo in sshd_config" and "fstab lists a disk that is gone"; five captured and one
-  was stopped by the owner and voided. `tools/live_check.py` passed against the sandbox, and six
-  real webhook deliveries were verified ([docs/evidence/](docs/evidence/README.md)). The other
+- **What has run where.** Ten rescues ran against the PayPal sandbox with Claude Haiku 5.5: two
+  on a local test VM and eight on the hosted Keyhold (an x86-64 cloud VM with KVM). They covered
+  two faults, "Typo in sshd_config" and "fstab lists a disk that is gone"; seven captured and
+  three were stopped by the owner and voided. `tools/live_check.py` passed against the sandbox,
+  and fourteen real webhook deliveries were verified ([docs/evidence/](docs/evidence/README.md)). The other
   faults have run on real guests only with `FakePayPal` and a scripted agent
   (`tools/vm/prove.py`). Claude Opus 5.5 is supported but was not used in the live runs.
 - **No hosting provider console.** Keyhold drives a local QEMU guest over QMP. Using a real
@@ -364,6 +371,10 @@ Claude is one part of a rescue and has no way to move money.
   next input once its verified webhook has arrived. Before that, the lease sees it at its next
   PayPal read, which comes at least every 5 inputs and before any input once the last read is
   15 seconds old. Up to that read, inputs still go through.
+- **A cut command stays on the console line.** When Stop cuts text mid-command, the keys already
+  sent stay typed on the console line, not run. Keyhold does not clear it; the next person at that
+  console should press Ctrl+U before Enter. The check and the key send are not one atomic step, so
+  a batch can still start in the few microseconds after Stop sets its flag.
 - **The keystroke firewall is a screen, not a sandbox.** It cannot follow scripts that already
   exist on the server, file contents assembled over several commands, or edits made with arrow
   keys (it refuses Enter after those instead). Its limits are listed in
