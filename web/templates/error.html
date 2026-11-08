@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · Keyhold{% endblock %}
+{% block main %}
+<section class="card narrow" aria-labelledby="err-title">
+  <h1 id="err-title" class="card-title">{{ title }}</h1>
+  <p>{{ message }}</p>
+  <p class="actions"><a class="button" href="/">Home</a> <a class="button" href="/try">Try it</a></p>
+</section>
+{% endblock %}

@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+var/
+images/*.qcow2
+images/*.img
+runs/
+.hypothesis/
+.pytest_cache/
+.ruff_cache/
+.DS_Store

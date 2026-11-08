@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stage_steps, quote_card %}
+{% block title %}{{ run.fault_title }} · Keyhold{% endblock %}
+{% block body_attrs %}data-page="run" data-run-id="{{ run.id }}" data-stage="{{ run.stage }}"{% if rescue %} data-rescue-id="{{ rescue.id }}"{% endif %}{% if quote %} data-amount="{{ quote.amount }}"{% endif %} data-sdk-url="{{ sdk_url }}"{% endblock %}
+{% block main %}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="/try">Try it</a> <span aria-hidden="true">/</span> Run <code>{{ run.id }}</code></nav>
+<div class="page-head">
+  <h1>{{ run.fault_title }}</h1>
+  <p class="lede" id="run-detail" aria-live="polite">{{ run.detail }}</p>
+</div>
+{{ stage_steps(run.stage) }}
+
+{% if run.stage in ['booting', 'looking'] %}
+<section class="cols">
+  <div class="card">
+    <h2 class="card-title">Console</h2>
+    <figure class="screen" id="screen">
+      {% if run.thumbs %}{% set t = run.thumbs[-1] %}<img src="{{ t.url }}" alt="Console screen, {{ t.label }}" width="{{ t.width }}" height="{{ t.height }}">
+      {% else %}<div class="screen-empty"><span class="live-dot" aria-hidden="true"></span> Waiting for the first screenshot</div>{% endif %}
+    </figure>
+  </div>
+  <div class="card">
+    <h2 class="card-title">Progress</h2>
+    <ol class="notes" id="notes">
+      {% for n in run.notes %}<li><time>{{ n.at[11:19] }}</time> {{ n.text }}</li>{% endfor %}
+    </ol>
+    <p class="muted">This page updates by itself.</p>
+  </div>
+</section>
+
+{% elif payable and quote %}
+<section class="cols">
+  <div class="stack">
+    {{ quote_card(quote, probe) }}
+  </div>
+  <div class="stack">
+    <section class="card checkout" aria-labelledby="checkout-title">
+      <h2 id="checkout-title" class="card-title">Hold ${{ quote.amount }} with PayPal</h2>
+      <p>Approving creates a PayPal order with intent <strong>AUTHORIZE</strong> for ${{ quote.amount }} and authorizes
+        it. Nothing is captured unless your probe passes. Stop, a give-up or a failed probe voids the hold.</p>
+      {% if offline %}
+      <p class="note">Offline mode: there is no PayPal window. The button creates the order in FakePayPal, approves it as a
+        simulated buyer, then authorizes it, through the same server endpoints the PayPal JS SDK v6 flow uses.</p>
+      <button class="button button-primary button-wide" type="button" id="offline-approve">Approve the hold (simulated PayPal)</button>
+      {% else %}
+      {% if settings.judge_buyer_email %}
+      <div class="buyer-login" aria-label="Sandbox buyer login">
+        <p class="muted">PayPal opens its sandbox login. Log in as this test buyer (test money only):</p>
+        <dl class="kv">
+          <dt>Email</dt><dd><code id="buyer-email">{{ settings.judge_buyer_email }}</code>
+            <button class="button button-quiet button-small" type="button" data-copy="buyer-email">Copy</button></dd>
+          {% if settings.judge_buyer_password %}
+          <dt>Password</dt><dd><code id="buyer-password">{{ settings.judge_buyer_password }}</code>
+            <button class="button button-quiet button-small" type="button" data-copy="buyer-password">Copy</button></dd>
+          {% endif %}
+        </dl>
+      </div>
+      {% endif %}
+      <div id="paypal-area" class="paypal-area">
+        <paypal-button id="paypal-button" type="pay" class="paypal-gold" hidden></paypal-button>
+        <p class="muted" id="paypal-loading"><span class="live-dot" aria-hidden="true"></span> Loading PayPal (JS SDK v6, sandbox)</p>
+      </div>
+      {% endif %}
+      <p class="checkout-status" id="checkout-status" role="status" aria-live="polite"></p>
+      {% if minutes_left is not none %}<p class="muted">Check out within {{ minutes_left }} minute{{ '' if minutes_left == 1 else 's' }}, or the server is released and nothing is held.</p>{% endif %}
+    </section>
+    <section class="card">
+      <h2 class="card-title">Console during the free look</h2>
+      <figure class="screen" id="screen">
+        {% if run.thumbs %}{% set t = run.thumbs[-1] %}<img src="{{ t.url }}" alt="Console screen during the free look" width="{{ t.width }}" height="{{ t.height }}">{% endif %}
+      </figure>
+      <p class="muted">Screenshots only. No key was pressed.</p>
+      {% if run.owner_note %}<p class="owner-note"><span class="muted">Your note, read as data:</span> {{ run.owner_note }}</p>{% endif %}
+    </section>
+    {% if rescue %}
+    <form method="post" action="/rescues/{{ rescue.id }}/stop" class="inline-form">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="button button-quiet" type="submit">Cancel this run</button>
+      <span class="muted">Releases the server. Nothing is held yet, so nothing is charged.</span>
+    </form>
+    {% endif %}
+  </div>
+</section>
+
+{% else %}
+<section class="card narrow" aria-labelledby="end-title">
+  {% if run.stage == 'no_quote' %}
+  <h2 id="end-title" class="card-title">No hold offered</h2>
+  <p>{{ run.no_quote_reason }}</p>
+  {% if run.fault_class == 'console_locked' %}
+  <p>This is the honest stop: the fix needs a password the console does not give, so Keyhold does not take a hold
+    it cannot earn. Nothing was held and nothing was charged.</p>
+  {% else %}
+  <p>Nothing was held and nothing was charged.</p>
+  {% endif %}
+  {% elif run.stage == 'expired' %}
+  <h2 id="end-title" class="card-title">Quote expired</h2>
+  <p>{{ run.detail }}</p>
+  {% elif run.stage == 'failed' %}
+  <h2 id="end-title" class="card-title">The run could not start</h2>
+  <p>{{ run.detail }}</p>
+  {% else %}
+  <h2 id="end-title" class="card-title">{{ run.stage_label }}</h2>
+  <p>{{ run.detail }}</p>
+  {% endif %}
+  {% if run.thumbs %}{% set t = run.thumbs[-1] %}
+  <figure class="screen"><img src="{{ t.url }}" alt="Last console screen" width="{{ t.width }}" height="{{ t.height }}"></figure>
+  {% endif %}
+  <p class="actions">
+    <a class="button button-primary" href="/try">Try another fault</a>
+    {% if rescue %}<a class="button" href="/rescues/{{ rescue.id }}">Ledger entry</a>{% endif %}
+  </p>
+</section>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script src="/static/run.js"></script>
+{% if payable and quote %}<script src="/static/checkout.js"></script>{% endif %}
+{% endblock %}

@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% from "_macros.html" import quote_card %}
+{% set r = snap.rescue %}
+{% set m = snap.money %}
+{% block title %}Rescue {{ r.id[:8] }} · Keyhold{% endblock %}
+{% block body_attrs %}data-page="rescue" data-rescue-id="{{ rescue_id }}"{% endblock %}
+{% block main %}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="/judge">Ledger</a> <span aria-hidden="true">/</span> Rescue <code>{{ r.id }}</code></nav>
+
+<div class="page-head head-row">
+  <div>
+    <h1>{% if snap.run %}{{ snap.run.fault_title }}{% else %}Rescue {{ r.id[:8] }}{% endif %}</h1>
+    <p class="lede"><span class="pill pill-state" id="state-pill">{{ r.state }}</span>
+      <span id="run-detail">{% if snap.run %}{{ snap.run.detail }}{% elif r.end_reason %}{{ r.end_reason }}{% endif %}</span></p>
+  </div>
+  <p class="live-flag" id="live-flag" {% if r.terminal and not (snap.run and snap.run.active) %}data-final="1"{% endif %}>
+    <span class="live-dot" aria-hidden="true"></span><span id="live-text">{% if r.terminal and not (snap.run and snap.run.active) %}Final{% else %}Live{% endif %}</span>
+  </p>
+</div>
+
+<section class="money money-{{ m.tone }}" id="money" aria-labelledby="money-label" aria-live="polite">
+  <div class="money-main">
+    <p class="money-label" id="money-label">{{ m.label }}</p>
+    <p class="money-amount" id="money-amount">${{ m.amount }}</p>
+    <p class="money-sentence" id="money-sentence">{{ m.sentence }}</p>
+    <p class="money-warning" id="money-warning" {% if not m.warning %}hidden{% endif %}>{{ m.warning or '' }}</p>
+  </div>
+  {% if can_stop %}
+  <form method="post" action="/rescues/{{ r.id }}/stop" class="stop-form" id="stop-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="button button-danger" type="submit" id="stop-button">Stop and void the hold</button>
+    <p class="muted" id="stop-help">Takes the keyboard back at once, then voids the PayPal authorization.</p>
+  </form>
+  {% endif %}
+</section>
+
+<div class="cols cols-wide">
+  <div class="stack">
+    <section class="card" aria-labelledby="pp-title">
+      <h2 id="pp-title" class="card-title">PayPal, read live</h2>
+      <div class="table-wrap">
+        <table class="kv-table" id="paypal-table">
+          <caption class="sr-only">PayPal objects for this rescue</caption>
+          <thead><tr><th scope="col">Object</th><th scope="col">Id</th><th scope="col">Status</th><th scope="col">Amount</th><th scope="col">Time (UTC)</th></tr></thead>
+          <tbody>
+            {% set pp = snap.paypal or {} %}
+            {% for key, name in [('order', 'Order'), ('authorization', 'Authorization'), ('capture', 'Capture'), ('refund', 'Refund')] %}
+            {% set o = pp.get(key) %}
+            <tr data-object="{{ key }}">
+              <th scope="row">{{ name }}</th>
+              <td>{% if o %}<code>{{ o.id }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+              <td>{% if o %}<span class="pill pill-status">{{ o.status }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+              <td>{% if o and o.amount %}${{ o.amount }}{% else %}<span class="muted">—</span>{% endif %}</td>
+              <td class="mono small">{% if o %}{% if key == 'authorization' %}expires {{ (o.expiration_time or '')[:19] | replace('T', ' ') }}{% elif o.create_time %}{{ o.create_time[:19] | replace('T', ' ') }}{% endif %}{% if key == 'capture' and o.final_capture %} · final_capture{% endif %}{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="muted small" id="paypal-checked">{% if pp.checked_at %}Read from {{ 'FakePayPal' if offline else 'the PayPal sandbox' }} at {{ pp.checked_at[11:19] }} UTC.{% endif %}</p>
+      <ul class="errors" id="paypal-errors">{% for e in pp.get('errors', []) %}<li>{{ e }}</li>{% endfor %}</ul>
+    </section>
+
+    <section class="card" aria-labelledby="ticks-title">
+      <h2 id="ticks-title" class="card-title">Two ticks per money call</h2>
+      <p class="muted small">Each call is written to the outbox with its PayPal-Request-Id before it is sent. The
+        synchronous answer is the first tick; the verified webhook is the second.</p>
+      <div class="table-wrap">
+        <table id="ticks-table">
+          <caption class="sr-only">Money operations and their confirmations</caption>
+          <thead><tr><th scope="col">Call</th><th scope="col">PayPal-Request-Id</th><th scope="col">API answer</th><th scope="col">Webhook</th></tr></thead>
+          <tbody>
+            {% for t in snap.ticks %}
+            <tr>
+              <th scope="row">{{ t.op }}</th>
+              <td><code>{{ t.request_id }}</code></td>
+              <td class="mono small">{% if t.api_at %}<span class="tick tick-on">{{ t.api_at[11:19] }}</span>{% else %}<span class="tick">{{ t.status | lower }}{% if t.error %}: {{ t.error }}{% endif %}</span>{% endif %}</td>
+              <td class="mono small">{% if not t.webhook %}<span class="muted">none for this call</span>{% elif t.webhook_at %}<span class="tick tick-on">{{ t.webhook_at[11:19] }}</span>{% else %}<span class="tick">waiting</span>{% endif %}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" class="muted">No money call yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="console-title">
+      <h2 id="console-title" class="card-title">Console</h2>
+      <figure class="screen{% if not snap.thumbs %} screen-none{% endif %}" id="screen">
+        {% if snap.thumbs %}{% set t = snap.thumbs[-1] %}<img src="{{ t.url }}" alt="Console screen at {{ t.at[11:19] }} UTC, {{ t.label }}" width="{{ t.width }}" height="{{ t.height }}">
+        {% else %}<div class="screen-empty">No console screenshots are stored for this rescue.</div>{% endif %}
+      </figure>
+      <ol class="thumbs" id="thumbs" aria-label="Earlier screens">
+        {% for t in snap.thumbs[-12:] %}<li><a href="{{ t.url }}"><img src="{{ t.url }}" alt="Screen at {{ t.at[11:19] }} UTC, {{ t.label }}" loading="lazy" width="120" height="{{ (120 * t.height / t.width) | int }}"></a></li>{% endfor %}
+      </ol>
+    </section>
+  </div>
+
+  <div class="stack">
+    <section class="card" aria-labelledby="tl-title">
+      <h2 id="tl-title" class="card-title">What happened</h2>
+      <p class="muted small">Agent actions, firewall refusals, lock checks, probe results and every PayPal call, in order (UTC).</p>
+      <ol class="timeline" id="timeline">
+        {% for e in snap.timeline %}
+        <li class="tl tl-{{ e.group }}{% if e.tone %} tl-{{ e.tone }}{% endif %}{% if e.muted %} tl-muted{% endif %}" data-id="{{ e.id }}">
+          <time class="mono">{{ (e.at or '')[11:19] }}</time>
+          <span class="tl-tag">{{ e.group_label }}</span>
+          <span class="tl-text">{{ e.text }}</span>
+        </li>
+        {% endfor %}
+      </ol>
+    </section>
+  </div>
+</div>
+
+<div class="cols">
+  <div class="stack">{{ quote_card(snap.quote, snap.probe) }}</div>
+  <div class="stack">
+    <section class="card" aria-labelledby="checks-title">
+      <h2 id="checks-title" class="card-title">Ledger checks</h2>
+      <p id="invariants">{% if snap.invariants %}<span class="pill pill-warn">problem</span> {{ snap.invariants | join('; ') }}{% else %}<span class="pill pill-captured">ok</span> captured ≤ authorized ≤ quote, one capture at most, no void after capture, refund ≤ captured.{% endif %}</p>
+      <dl class="kv">
+        <dt>Invoice id</dt><dd><code>{{ r.invoice_id }}</code></dd>
+        <dt>Created</dt><dd class="mono">{{ r.created_at | replace('T', ' ') | replace('Z', ' UTC') }}</dd>
+        {% if snap.model_spend %}<dt>Model cost</dt><dd>about ${{ snap.model_spend }}</dd>{% endif %}
+        <dt>Timing</dt><dd>{{ snap.policy }}</dd>
+      </dl>
+    </section>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/live.js"></script>{% endblock %}

@@ -1,0 +1,37 @@
+{% macro stage_steps(stage) -%}
+{%- set order = ['booting', 'looking', 'quoted', 'checkout', 'rescuing'] -%}
+{%- set labels = {'booting': 'Boot', 'looking': 'Free look', 'quoted': 'Quote', 'checkout': 'Hold', 'rescuing': 'Rescue'} -%}
+{%- set current = order.index(stage) if stage in order else (5 if stage in ['warranty', 'finished'] else -1) -%}
+<ol class="steps" aria-label="Progress">
+  {% for s in order %}
+  <li class="step {% if loop.index0 < current %}step-done{% elif loop.index0 == current %}step-current{% endif %}" {% if loop.index0 == current %}aria-current="step"{% endif %}>{{ labels[s] }}</li>
+  {% endfor %}
+</ol>
+{%- endmacro %}
+
+{% macro quote_card(quote, probe) -%}
+<section class="card" aria-labelledby="quote-title">
+  <h2 id="quote-title" class="card-title">Quote</h2>
+  <p class="quote-price"><span class="amount">${{ quote.amount }}</span> <span class="pill pill-neutral">{{ quote.tier }}</span></p>
+  <p class="diagnosis"><span class="muted small">Diagnosis</span><br><strong>{{ quote.title }}</strong><br><code>{{ quote.fault_class }}</code></p>
+  <h3 class="mini-title">Evidence from the screen</h3>
+  <ul class="evidence">
+    {% for line in quote.evidence %}<li><code>{{ line }}</code></li>{% endfor %}
+  </ul>
+  <h3 class="mini-title">Plan</h3>
+  <p class="plan">{{ quote.plan }}</p>
+  <p class="hash"><span class="muted">Quote hash</span> <code>{{ quote.quote_hash }}</code></p>
+</section>
+{% if probe %}
+<section class="card" aria-labelledby="probe-title">
+  <h2 id="probe-title" class="card-title">Owner probe, fixed at checkout</h2>
+  <p>A capture happens only after this check passes twice, far enough apart, with no failure between.</p>
+  <dl class="kv">
+    <dt>SSH login</dt><dd>as <code>{{ probe.ssh_user }}</code> on port {{ probe.ssh_port }}, with a key only the probe holds</dd>
+    <dt>Probe key</dt><dd><code>{{ probe.key_fingerprint }}</code></dd>
+    <dt>Page</dt><dd>{{ probe.page }}: {{ probe.expect }}</dd>
+    <dt>Spec hash</dt><dd><code class="wrap-anywhere">{{ probe.spec_hash }}</code><br><span class="muted">Sent as the order's <code>custom_id</code>.</span></dd>
+  </dl>
+</section>
+{% endif %}
+{%- endmacro %}

@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Try a rescue · Keyhold{% endblock %}
+{% block main %}
+<div class="page-head">
+  <h1>Try a rescue</h1>
+  <p class="lede">Pick a broken server. A fresh copy starts with that fault, the agent takes a free look, and you
+    see the quote and the evidence before anything is held.
+    {% if settings.simulated %}In this deployment the server is simulated, so a run takes about a minute.{% else %}The
+    VM boots in 30 to 90 seconds.{% endif %}</p>
+</div>
+
+{% if error %}
+<div class="alert alert-warn" role="alert">{{ error }}</div>
+{% endif %}
+
+{% if my_run %}
+<div class="alert" role="status">You have a run in progress: <a href="/runs/{{ my_run.id }}">{{ my_run.fault_title }}</a>
+  ({{ my_run.stage_label | lower }}).</div>
+{% endif %}
+
+{% if not unlocked %}
+<section class="card narrow" aria-labelledby="pass-title">
+  <h2 id="pass-title" class="card-title">Passcode</h2>
+  {% if passcode_set %}
+  <p>Runs use a real test VM and a paid model, so /try is behind a passcode. It is in the submission's testing
+    instructions.</p>
+  <form method="post" action="/try/unlock" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="passcode">Passcode</label>
+    <input id="passcode" name="passcode" type="password" autocomplete="off" required>
+    <button class="button button-primary" type="submit">Unlock</button>
+  </form>
+  {% else %}
+  <p>The operator has not set a passcode, so new runs are closed. The <a href="/judge">ledger</a> of earlier runs
+    is open.</p>
+  {% endif %}
+</section>
+{% else %}
+
+<ol class="steps" aria-label="How a test goes">
+  <li><strong>Pick a broken server</strong> below. A fresh copy boots with that fault, and Claude takes a free look:
+    screenshots only, no keys. You get a fixed price and the screen lines it is based on.</li>
+  <li><strong>Approve the hold</strong> with the PayPal button. It is the PayPal sandbox (test money);
+    {% if settings.judge_buyer_email %}the sandbox buyer login is shown right next to the button.{% else %}log in
+    with a sandbox buyer account.{% endif %}</li>
+  <li><strong>Watch.</strong> Claude gets the keyboard only while the hold is live. Your probe (an SSH login and the
+    web page) decides: pass twice and the hold is captured; Stop or a give-up voids it.</li>
+</ol>
+
+<section class="status-row" aria-label="Capacity">
+  <div class="stat">
+    <span class="stat-label">{% if slots_total > 1 %}Test servers{% else %}Test server{% endif %}</span>
+    <span class="stat-value">{% if slot_busy %}<span class="pill pill-held">busy</span>{% elif slots_total > 1 %}<span class="pill pill-captured">{{ slots_free }} of {{ slots_total }} free</span>{% else %}<span class="pill pill-captured">free</span>{% endif %}</span>
+    {% if slot_busy %}<span class="stat-note">{{ slot_message }}</span>{% elif slots_total > 1 %}<span class="stat-note">One run per browser at a time.</span>{% else %}<span class="stat-note">One server at a time.</span>{% endif %}
+  </div>
+  <div class="stat">
+    <span class="stat-label">Runs left this hour</span>
+    <span class="stat-value">{{ runs_left }} of {{ runs_per_hour }}</span>
+    <span class="stat-note">Per address.</span>
+  </div>
+  {% if paid_model %}
+  <div class="stat">
+    <span class="stat-label">Model budget, last 24 h</span>
+    <span class="stat-value">${{ spend_remaining }} left</span>
+    <span class="stat-note">Cap ${{ spend_cap }}. A run that reaches its own budget is stopped and voided.</span>
+  </div>
+  {% endif %}
+</section>
+
+{% if problems %}
+<div class="alert alert-warn" role="alert">
+  <p><strong>The test server is not ready.</strong></p>
+  <ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<section aria-labelledby="faults-title">
+  <h2 id="faults-title" class="section-title">Pick a fault</h2>
+  <div class="fault-grid">
+    {% for f in faults %}
+    <form method="post" action="/try/start" class="card fault-card">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="fault" value="{{ f.id }}">
+      <h3>{{ f.title }}</h3>
+      <p>{{ f.blurb }}</p>
+      <dl class="kv">
+        <dt>Fault class</dt><dd><code>{{ f.fault_class }}</code></dd>
+        <dt>Expected price</dt>
+        <dd>{% if f.price %}{{ f.tier }}, ${{ f.price }} held, captured only if the probe passes{% else %}None. The honest answer is no hold.{% endif %}</dd>
+      </dl>
+      <label class="field-label" for="note-{{ f.id }}">What did you see? <span class="muted">(optional)</span></label>
+      <input type="text" id="note-{{ f.id }}" name="note" maxlength="300" autocomplete="off"
+             placeholder="{{ f.note_hint }}">
+      <button class="button {% if loop.first %}button-primary{% endif %}" type="submit" {% if slot_busy or problems %}disabled{% endif %}>Break this server</button>
+    </form>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endblock %}
