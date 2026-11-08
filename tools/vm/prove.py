@@ -49,6 +49,7 @@ from keyhold.console.base import ConsoleError
 from keyhold.console.docker import DockerRunner
 from keyhold.console.image import (
     VMHome,
+    base_image_for,
     load_golden_info,
     new_run_vm,
     probe_spec_for,
@@ -241,13 +242,17 @@ def prove_fault(home: VMHome, runner: DockerRunner, fault: Fault, out: Path) -> 
 
     vm = new_run_vm(home, runner, fault.id)
     run_id = vm.run_dir.name
-    mark("run overlay created")
+    result["arch"] = vm.arch
+    mark(f"run overlay created ({vm.arch} guest)")
     console: CountingConsole | None = None
     ledger: Ledger | None = None
     recorder: Recorder | None = None
     try:
         endpoints = vm.start()
         result["accel"] = vm.accel
+        if vm.kvm_fallback:
+            result["kvm_fallback"] = vm.kvm_fallback
+            mark("KVM failed to start the guest; started again under TCG")
         mark(f"container started ({vm.accel})")
         if vm.wait_for_serial(fault.ready_marker, timeout=BOOT_TIMEOUT) is None:
             raise RuntimeError(f"the symptom marker {fault.ready_marker!r} did not appear in {BOOT_TIMEOUT:.0f}s")
@@ -488,7 +493,8 @@ def main(argv: list[str] | None = None) -> int:
     if not runner.available() or not runner.image_present():
         print("docker or the runner image is missing; run: uv run python tools/vm/vm.py runner", file=sys.stderr)
         return 1
-    if not verify_base_image(home.base_image()):
+    image = base_image_for(runner.arch())
+    if not verify_base_image(home.base_image(image), image):
         print("base image missing or unverified; run: uv run python tools/vm/vm.py fetch", file=sys.stderr)
         return 1
     unknown = [f for f in args.faults if f not in FAULTS]
@@ -505,7 +511,7 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = Path(args.out) if args.out else PROJECT / "runs" / "real-vm" / stamp
     out.mkdir(parents=True, exist_ok=True)
-    summary: dict[str, Any] = {"started": stamp, "faults": {}}
+    summary: dict[str, Any] = {"started": stamp, "arch": runner.arch(), "faults": {}}
     for fault_id in ids:
         fault = FAULTS[fault_id]
         print(f"{fault.id}: {fault.title}", flush=True)

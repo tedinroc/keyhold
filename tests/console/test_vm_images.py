@@ -5,18 +5,23 @@ Everything runs against fakes: a fake URL opener, a fake docker CLI and a fake V
 
 from __future__ import annotations
 
+import email.message
 import hashlib
 import io
 import json
 import os
 import stat
 import subprocess
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from keyhold.console.image import (
+    BASE_IMAGES,
+    DEBIAN_13_AMD64,
     DEBIAN_13_ARM64,
     GOLDEN_MARKER,
     PAGE_MARKER,
@@ -25,8 +30,10 @@ from keyhold.console.image import (
     ImageError,
     VMHome,
     _default_opener,
+    base_image_for,
     build_golden,
     build_iso,
+    check_arch,
     create_overlay,
     ensure_console_password,
     ensure_probe_key,
@@ -47,6 +54,8 @@ from keyhold.console.image import (
     write_seed_dir,
 )
 from keyhold.console.qemu import GUEST_MAC, VMEndpoints
+from keyhold.faults import FAULTS
+from keyhold.faults.plant import plant_fault
 from keyhold.types import ProbeSpec
 
 PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTestsOnly0000000000000000000 keyhold-owner-probe"
@@ -63,15 +72,65 @@ def _image(payload: bytes, name: str = "test-image.qcow2") -> BaseImage:
     )
 
 
+class FakeResponse(io.BytesIO):
+    """A response body. With ``cut`` = ("reset", n) the connection breaks after n bytes; with
+    ("close", n) the body just ends there."""
+
+    def __init__(self, data: bytes, status: int | None = None, headers=None, cut=None) -> None:
+        super().__init__(data)
+        self.status = status
+        self.headers = headers or {}
+        self.cut = cut
+        self.sent = 0
+
+    def read(self, size: int | None = -1) -> bytes:
+        if self.cut is not None:
+            how, limit = self.cut
+            if self.sent >= limit:
+                if how == "reset":
+                    raise ConnectionResetError("connection reset by peer")
+                return b""
+            size = limit - self.sent if size is None or size < 0 else min(size, limit - self.sent)
+        block = super().read(size)
+        self.sent += len(block)
+        return block
+
+
 class FakeOpener:
-    def __init__(self, files: dict[str, bytes]) -> None:
+    """Serves ``files``. ``ranges``: True answers a range request with 206 like a real server,
+    False ignores it (200, the whole file), "wrong" answers with a range from another offset.
+    ``cuts`` and ``errors`` list, per URL, what each connection does: a cut for its body (see
+    FakeResponse; None for none), or an exception raised when it opens (None for none)."""
+
+    def __init__(self, files: dict[str, bytes], *, ranges=True, cuts=None, errors=None) -> None:
         self.files = files
+        self.ranges = ranges
+        self.cuts = {url: list(v) for url, v in (cuts or {}).items()}
+        self.errors = {url: list(v) for url, v in (errors or {}).items()}
         self.opened: list[str] = []
+        self.starts: list[int] = []
 
     @contextmanager
-    def __call__(self, url: str):
+    def __call__(self, url: str, start: int = 0):
         self.opened.append(url)
-        yield io.BytesIO(self.files[url])
+        self.starts.append(start)
+        if self.errors.get(url) and (exc := self.errors[url].pop(0)) is not None:
+            raise exc
+        data = self.files[url]
+        status, headers = None, {}
+        if start and self.ranges is True:
+            status, headers = 206, {"Content-Range": f"bytes {start}-{len(data) - 1}/{len(data)}"}
+            data = data[start:]
+        elif start and self.ranges == "wrong":
+            status, headers = 206, {"Content-Range": f"bytes 0-{len(data) - 1}/{len(data)}"}
+        elif start:
+            status = 200
+        cut = self.cuts[url].pop(0) if self.cuts.get(url) else None
+        yield FakeResponse(data, status, headers, cut)
+
+
+def _http_error(url: str, code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(url, code, "test", email.message.Message(), None)
 
 
 def _mode(path: Path) -> int:
@@ -81,10 +140,22 @@ def _mode(path: Path) -> int:
 # ------------------------------------------------------------------------------- base image
 
 
-def test_pinned_debian_image() -> None:
-    assert DEBIAN_13_ARM64.filename.startswith("debian-13-genericcloud-arm64-")
-    assert DEBIAN_13_ARM64.url.startswith("https://") and DEBIAN_13_ARM64.url.endswith(DEBIAN_13_ARM64.filename)
-    assert len(DEBIAN_13_ARM64.sha512) == 128 and int(DEBIAN_13_ARM64.sha512, 16)
+@pytest.mark.parametrize(("arch", "image"), [("arm64", DEBIAN_13_ARM64), ("amd64", DEBIAN_13_AMD64)])
+def test_pinned_debian_image(arch, image) -> None:
+    assert image.filename.startswith(f"debian-13-genericcloud-{arch}-") and image.filename.endswith(".qcow2")
+    assert image.url.startswith("https://cloud.debian.org/") and image.url.endswith(image.filename)
+    assert image.sums_url == image.url.rsplit("/", 1)[0] + "/SHA512SUMS"
+    assert len(image.sha512) == 128 and int(image.sha512, 16)
+    assert base_image_for(arch) is image and BASE_IMAGES[arch] is image
+
+
+def test_both_arches_come_from_the_same_debian_build() -> None:
+    build = DEBIAN_13_ARM64.filename.removeprefix("debian-13-genericcloud-arm64-")
+    assert DEBIAN_13_AMD64.filename == f"debian-13-genericcloud-amd64-{build}"
+    assert DEBIAN_13_AMD64.sums_url == DEBIAN_13_ARM64.sums_url
+    assert DEBIAN_13_AMD64.sha512 != DEBIAN_13_ARM64.sha512
+    with pytest.raises(ValueError):
+        base_image_for("i386")
 
 
 def test_parse_sha512sums() -> None:
@@ -113,7 +184,7 @@ def test_fetch_downloads_verifies_and_marks_read_only(tmp_path) -> None:
 
 def test_fetch_rejects_a_bad_download(tmp_path) -> None:
     image = _image(b"the real image")
-    opener = FakeOpener({image.sums_url: f"{image.sha512}  {image.filename}\n".encode(), image.url: b"tampered"})
+    opener = FakeOpener({image.sums_url: f"{image.sha512}  {image.filename}\n".encode(), image.url: b"the fake image"})
     home = VMHome(tmp_path)
     with pytest.raises(ImageError, match="SHA512 mismatch"):
         fetch_base_image(home, image, opener=opener)
@@ -141,6 +212,139 @@ def test_fetch_replaces_a_corrupt_local_copy(tmp_path) -> None:
 def test_default_opener_refuses_plain_http() -> None:
     with pytest.raises(ImageError):
         _default_opener("http://images.test/x.qcow2")
+
+
+MiB = 1 << 20
+
+
+def _sums(image: BaseImage) -> bytes:
+    return f"{image.sha512}  {image.filename}\n".encode()
+
+
+class Waits:
+    def __init__(self) -> None:
+        self.sleeps: list[float] = []
+        self.notices: list[str] = []
+
+    def kwargs(self) -> dict:
+        return {"sleep": self.sleeps.append, "notice": self.notices.append}
+
+
+@pytest.mark.parametrize("how", ["reset", "close"])
+def test_fetch_resumes_after_the_connection_drops(tmp_path, how) -> None:
+    """Regression: one dropped connection lost the whole download (the fetch failed four times
+    in a row at 17 to 41 % on a flaky network). Now each connection resumes where the last one
+    stopped, with an HTTP range request."""
+    payload = os.urandom(3 * MiB + 17)
+    image = _image(payload)
+    cut = 3 * MiB // 2
+    opener = FakeOpener({image.sums_url: _sums(image), image.url: payload}, cuts={image.url: [(how, cut), (how, MiB)]})
+    waits, seen = Waits(), []
+    home = VMHome(tmp_path)
+    path = fetch_base_image(home, image, opener=opener, progress=lambda d, t: seen.append(d), **waits.kwargs())
+    assert path.read_bytes() == payload and _mode(path) == 0o444
+    assert opener.starts[1:] == [0, cut, cut + MiB]  # after the SHA512SUMS
+    assert waits.sleeps == [1.0, 1.0]  # each connection added bytes, so no back-off
+    assert len(waits.notices) == 2 and "resuming at 1 MB" in waits.notices[0]
+    assert seen == sorted(seen) and seen[-1] == len(payload)
+    assert not path.with_name(path.name + ".part").exists()
+
+
+def test_fetch_resumes_a_part_left_by_an_earlier_run(tmp_path) -> None:
+    payload = os.urandom(2 * MiB + 3)
+    image = _image(payload)
+    home = VMHome(tmp_path).ensure()
+    part = home.base_image(image).with_name(image.filename + ".part")
+    part.write_bytes(payload[: MiB + 5])
+    opener = FakeOpener({image.url: payload})
+    path = fetch_base_image(home, image, opener=opener, check_published_sums=False, **Waits().kwargs())
+    assert path.read_bytes() == payload and opener.starts == [MiB + 5]
+
+
+@pytest.mark.parametrize("ranges", [False, "wrong"])
+def test_fetch_starts_over_when_the_server_does_not_send_the_range(tmp_path, ranges) -> None:
+    payload = os.urandom(MiB + 9)
+    image = _image(payload)
+    home = VMHome(tmp_path).ensure()
+    part = home.base_image(image).with_name(image.filename + ".part")
+    part.write_bytes(payload[:1000])
+    opener = FakeOpener({image.url: payload}, ranges=ranges)
+    waits = Waits()
+    path = fetch_base_image(home, image, opener=opener, check_published_sums=False, **waits.kwargs())
+    assert path.read_bytes() == payload
+    # Ignored range: the whole file came back and replaced the part. Wrong range: the part was
+    # dropped and the next connection started from byte 0.
+    assert opener.starts == ([1000] if ranges is False else [1000, 0])
+
+
+def test_fetch_starts_over_after_http_416(tmp_path) -> None:
+    payload = os.urandom(5000)
+    image = _image(payload)
+    home = VMHome(tmp_path).ensure()
+    part = home.base_image(image).with_name(image.filename + ".part")
+    part.write_bytes(payload[:100])
+    opener = FakeOpener({image.url: payload}, errors={image.url: [_http_error(image.url, 416)]})
+    path = fetch_base_image(home, image, opener=opener, check_published_sums=False, **Waits().kwargs())
+    assert path.read_bytes() == payload and opener.starts == [100, 0]
+
+
+def test_fetch_gives_up_without_progress_and_resumes_next_time(tmp_path) -> None:
+    payload = os.urandom(2 * MiB)
+    image = _image(payload)
+    home = VMHome(tmp_path)
+    down = [ConnectionRefusedError("refused"), TimeoutError("timed out"), _http_error(image.url, 503)]
+    opener = FakeOpener({image.url: payload}, cuts={image.url: [("reset", MiB)]}, errors={image.url: [None, *down]})
+    waits = Waits()
+    with pytest.raises(ImageError, match="3 tries in a row without progress; run the command again to resume from"):
+        fetch_base_image(home, image, opener=opener, check_published_sums=False, attempts=3, **waits.kwargs())
+    assert waits.sleeps == [1.0, 2.0, 4.0]  # back-off only while nothing arrives
+    part = home.base_image(image).with_name(image.filename + ".part")
+    assert part.read_bytes() == payload[:MiB]  # kept for the next run
+    assert not home.base_image(image).exists()
+
+    again = FakeOpener({image.url: payload})
+    path = fetch_base_image(home, image, opener=again, check_published_sums=False, **waits.kwargs())
+    assert path.read_bytes() == payload and again.starts == [MiB]
+
+
+def test_fetch_does_not_retry_a_missing_file(tmp_path) -> None:
+    image = _image(b"payload")
+    opener = FakeOpener({image.url: b"payload"}, errors={image.url: [_http_error(image.url, 404)]})
+    waits = Waits()
+    with pytest.raises(ImageError, match="HTTP 404"):
+        fetch_base_image(VMHome(tmp_path), image, opener=opener, check_published_sums=False, **waits.kwargs())
+    assert waits.sleeps == [] and opener.opened == [image.url]
+
+
+def test_fetch_retries_the_sums_file(tmp_path) -> None:
+    image = _image(b"payload")
+    flaky = [_http_error(image.sums_url, 502), ConnectionResetError("reset")]
+    opener = FakeOpener({image.sums_url: _sums(image), image.url: b"payload"}, errors={image.sums_url: flaky})
+    waits = Waits()
+    fetch_base_image(VMHome(tmp_path), image, opener=opener, **waits.kwargs())
+    assert opener.opened == [image.sums_url] * 3 + [image.url] and waits.sleeps == [2.0, 4.0]
+
+    gone = FakeOpener({image.sums_url: b""}, errors={image.sums_url: [_http_error(image.sums_url, 404)]})
+    with pytest.raises(ImageError, match="SHA512SUMS: HTTP Error 404"):
+        fetch_base_image(VMHome(tmp_path / "other"), image, opener=gone, **waits.kwargs())
+
+
+def test_fetch_discards_a_download_larger_than_expected(tmp_path) -> None:
+    image = _image(b"payload")
+    home = VMHome(tmp_path)
+    opener = FakeOpener({image.url: b"payload and more"})
+    with pytest.raises(ImageError, match="larger than the expected 7 bytes"):
+        fetch_base_image(home, image, opener=opener, check_published_sums=False, **Waits().kwargs())
+    assert list(home.base_dir.iterdir()) == []
+
+
+def test_default_opener_asks_for_a_range(monkeypatch) -> None:
+    sent = []
+    monkeypatch.setattr(urllib.request, "urlopen", lambda request, timeout: sent.append(request) or io.BytesIO())
+    _default_opener("https://images.test/x.qcow2")
+    _default_opener("https://images.test/x.qcow2", start=4096)
+    assert sent[0].get_header("Range") is None
+    assert sent[1].get_header("Range") == "bytes=4096-"
 
 
 # ------------------------------------------------------------------------------- seed
@@ -191,12 +395,30 @@ def test_user_data_installs_page_probe_key_and_hook_without_the_password() -> No
     assert config["power_state"]["mode"] == "poweroff"
 
 
-def test_guest_scripts_are_valid_bash() -> None:
-    config = json.loads(render_user_data(_cfg()).split("\n", 1)[1])
+@pytest.mark.parametrize("arch", ["arm64", "amd64"])
+def test_guest_scripts_are_valid_bash(arch) -> None:
+    config = json.loads(render_user_data(_cfg(arch=arch)).split("\n", 1)[1])
     for entry in config["write_files"]:
         if entry["content"].startswith("#!/bin/bash"):
             result = subprocess.run(["bash", "-n"], input=entry["content"], capture_output=True, text=True)
             assert result.returncode == 0, (entry["path"], result.stderr)
+
+
+@pytest.mark.parametrize(("arch", "tty", "other"), [("arm64", "ttyAMA0", "ttyS0"), ("amd64", "ttyS0", "ttyAMA0")])
+def test_serial_port_follows_the_guest_arch(arch, tty, other) -> None:
+    cfg = _cfg(arch=arch)
+    assert cfg.serial_tty == tty
+    text = render_user_data(cfg)
+    assert "@SERIAL@" not in text and other not in text
+    files = {f["path"]: f["content"] for f in json.loads(text.split("\n", 1)[1])["write_files"]}
+    # The kernel's serial console, the journal copy, and every marker the tools wait for.
+    assert f'GRUB_CMDLINE_LINUX="console={tty},115200 console=tty0' in files["/etc/default/grub.d/90-console.cfg"]
+    assert f"TTYPath=/dev/{tty}\n" in files["/etc/systemd/journald.conf.d/serial.conf"]
+    hook = files["/usr/local/sbin/keyhold-plant"]
+    assert hook.count(f"> /dev/{tty}") == 3 and "KEYHOLD-PLANT-$status" in hook
+    assert f'echo "{GOLDEN_MARKER}" > /dev/{tty}' in files["/usr/local/sbin/golden-finish"]
+    with pytest.raises(ValueError):
+        _cfg(arch="x86")
 
 
 def test_page_meta_and_network() -> None:
@@ -294,12 +516,15 @@ class FakeVM:
     def __init__(self, runner, **kwargs) -> None:
         self.runner = runner
         self.kwargs = kwargs
+        self.user_data: str | None = None
         FakeVM.instances.append(self)
 
     def run_to_poweroff(self, timeout: float) -> str:
         assert self.kwargs["stay_on_poweroff"] is False
         assert self.kwargs["disk"].exists()  # the overlay was created before the boot
         assert all(Path(d).exists() for d in self.kwargs["extra_drives"])
+        seed = Path(self.kwargs["extra_drives"][0]).parent / "seed" / "user-data"
+        self.user_data = seed.read_text() if seed.exists() else None
         return self.serial
 
 
@@ -333,6 +558,58 @@ def test_build_golden(golden_home) -> None:
     # A second call returns the existing build without booting.
     assert build_golden(home, runner, image=image, keygen=_fake_keygen, vm_factory=FakeVM) == info
     assert len(FakeVM.instances) == 1
+
+
+def test_build_golden_follows_the_runner_arch(golden_home) -> None:
+    home, runner, image, docker = golden_home
+    docker.arch, docker.daemon_arch = "amd64", "x86_64"
+    info = build_golden(home, runner, image=image, keygen=_fake_keygen, vm_factory=FakeVM)
+    assert info.arch == "amd64" and load_golden_info(home).arch == "amd64"
+    (vm,) = FakeVM.instances
+    assert vm.kwargs["arch"] == "amd64"
+    assert "console=ttyS0,115200" in vm.user_data and "ttyAMA0" not in vm.user_data
+    assert check_arch(home, runner) == "amd64"
+
+
+def test_build_golden_picks_the_base_image_for_the_arch(golden_home) -> None:
+    home, runner, _, docker = golden_home
+    docker.arch = "amd64"
+    with pytest.raises(ImageError, match=DEBIAN_13_AMD64.filename):
+        build_golden(home, runner, keygen=_fake_keygen, vm_factory=FakeVM)
+    with pytest.raises(ImageError, match=DEBIAN_13_ARM64.filename):
+        build_golden(home, runner, arch="arm64", keygen=_fake_keygen, vm_factory=FakeVM)
+    assert FakeVM.instances == []
+
+
+def test_golden_info_without_arch_is_arm64(golden_home) -> None:
+    """golden.json files written before amd64 guests existed have no arch field."""
+    home, runner, image, _ = golden_home
+    build_golden(home, runner, image=image, keygen=_fake_keygen, vm_factory=FakeVM)
+    data = json.loads(home.golden_info_file.read_text())
+    assert data.pop("arch") == "arm64"
+    home.golden_info_file.write_text(json.dumps(data))
+    assert load_golden_info(home).arch == "arm64"
+
+
+def test_a_vm_home_holds_one_arch(golden_home) -> None:
+    home, runner, image, docker = golden_home
+    build_golden(home, runner, image=image, keygen=_fake_keygen, vm_factory=FakeVM)  # arm64 runner
+    home.fault_disk("sshd-masked").write_bytes(b"fault")
+    amd64 = type(runner)(runner.vm_home, image=runner.image, run=docker)
+    docker.arch, docker.daemon_arch = "amd64", "x86_64"
+    with pytest.raises(ImageError, match="for arm64 guests, but the runner image .* is amd64"):
+        check_arch(home, amd64)
+    with pytest.raises(ImageError, match="arm64 guests"):
+        new_run(home, amd64, "sshd-masked")
+    with pytest.raises(ImageError, match="arm64 guests"):
+        plant_fault(home, amd64, FAULTS["sshd-config-typo"], vm_factory=FakeVM)
+    with pytest.raises(ImageError, match="--force"):
+        build_golden(home, amd64, image=image, keygen=_fake_keygen, vm_factory=FakeVM)
+    assert not home.runs_dir.exists() or not any(home.runs_dir.iterdir())
+    assert len(FakeVM.instances) == 1
+    # Rebuilding on purpose replaces the arm64 images with amd64 ones.
+    info = build_golden(home, amd64, image=image, force=True, keygen=_fake_keygen, vm_factory=FakeVM)
+    assert info.arch == "amd64" and not home.fault_disk("sshd-masked").exists()
 
 
 def test_build_golden_force_drops_fault_images(golden_home) -> None:

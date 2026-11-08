@@ -35,6 +35,7 @@ KEYHOLD_RUN_BUDGET_USD             model spend allowed per run (default 3)
 KEYHOLD_TRY_RUNS_PER_HOUR          runs one IP address may start per hour (default 4)
 KEYHOLD_TRUST_PROXY                ``1``: the client address is the last X-Forwarded-For entry
 KEYHOLD_VM_HOME                    VM images and runs (default ``var/vm``)
+KEYHOLD_RUNNER_IMAGE               QEMU runner image (default ``keyhold-qemu-runner:3``)
 KEYHOLD_PROBE_STATE_DIR            known_hosts files of the owner probe (default ``var/probe``)
 KEYHOLD_MODEL                      claude-opus-5-5 (default) or claude-haiku-5-5
 KEYHOLD_MODEL_SESSION_HEADER       header that carries one id per rescue, for gateways that ask for it

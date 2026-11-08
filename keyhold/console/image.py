@@ -1,15 +1,20 @@
-"""Guest images: download the Debian 13 arm64 genericcloud qcow2 and verify its SHA512, build the
-cloud-init NoCloud seed, and create copy-on-write overlays so a fault can be reset instantly.
+"""Guest images: download the Debian 13 genericcloud qcow2 for the guest architecture (arm64 or
+amd64) and verify its SHA512, build the cloud-init NoCloud seed, and create copy-on-write overlays
+so a fault can be reset instantly.
 
 Disk chain (all qcow2, each file backed by the one before it through a relative path):
 
-    base/debian-13-genericcloud-arm64-<build>.qcow2   the official image, read-only
+    base/debian-13-genericcloud-<arch>-<build>.qcow2  the official image, read-only
       golden/golden.qcow2        one cloud-init boot: demo page, probe key, console password
         faults/<fault>.qcow2     one prepare boot that plants the fault (keyhold.faults.plant)
           runs/<run>/disk.qcow2  what a rescue run boots and the agent types into
 
 A run overlay is created in milliseconds and thrown away afterwards, so every run starts from the
 same broken server.
+
+One VM home holds the images of one architecture, the runner image's (``DockerRunner.arch``). The
+golden image records its architecture, and building a fault image or a run refuses a runner of
+another architecture.
 
 Secrets stay under the VM home (git-ignored ``var/vm`` by default) and are never printed: the
 console password (``golden/console-password``, mode 600) and the probe private key
@@ -19,6 +24,7 @@ console password (``golden/console-password``, mode 600) and the probe private k
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -26,6 +32,7 @@ import secrets
 import shutil
 import subprocess
 import time
+import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable, Iterable, Iterator
@@ -35,14 +42,18 @@ from pathlib import Path
 from typing import IO, Any
 
 from keyhold.console.base import ConsoleError
-from keyhold.console.docker import LOOPBACK, DockerRunner
-from keyhold.console.qemu import GUEST_MAC, QemuVM, VMEndpoints
+from keyhold.console.docker import GUEST_ARCHES, LOOPBACK, DockerRunner
+from keyhold.console.qemu import GUEST_MAC, SERIAL_TTY, QemuVM, VMEndpoints
 from keyhold.types import ProbeSpec, sha256_hex
 
 __all__ = [
     "ImageError",
     "BaseImage",
     "DEBIAN_13_ARM64",
+    "DEBIAN_13_AMD64",
+    "BASE_IMAGES",
+    "base_image_for",
+    "check_arch",
     "VMHome",
     "default_vm_home",
     "sha512_file",
@@ -95,6 +106,7 @@ class BaseImage:
 
 DEBIAN_BUILD = "20261103-2651"
 _DEBIAN_DIR = f"https://cloud.debian.org/images/cloud/trixie/{DEBIAN_BUILD}"
+# Both from the same Debian build; the hashes are the ones in that build's published SHA512SUMS.
 DEBIAN_13_ARM64 = BaseImage(
     filename=f"debian-13-genericcloud-arm64-{DEBIAN_BUILD}.qcow2",
     url=f"{_DEBIAN_DIR}/debian-13-genericcloud-arm64-{DEBIAN_BUILD}.qcow2",
@@ -105,6 +117,25 @@ DEBIAN_13_ARM64 = BaseImage(
     sums_url=f"{_DEBIAN_DIR}/SHA512SUMS",
     size=337_641_472,
 )
+DEBIAN_13_AMD64 = BaseImage(
+    filename=f"debian-13-genericcloud-amd64-{DEBIAN_BUILD}.qcow2",
+    url=f"{_DEBIAN_DIR}/debian-13-genericcloud-amd64-{DEBIAN_BUILD}.qcow2",
+    sha512=(
+        "d25999de0770d4cde1be72c299ba3ad94eac7ea8fd4d18f8cc86c69df69337e2"
+        "e8a91d64465a9bfd8f2a78c566fcbcb0842eacc91c09efdef72d719d9f13b535"
+    ),
+    sums_url=f"{_DEBIAN_DIR}/SHA512SUMS",
+    size=341_180_416,
+)
+BASE_IMAGES = {"arm64": DEBIAN_13_ARM64, "amd64": DEBIAN_13_AMD64}
+
+
+def base_image_for(arch: str) -> BaseImage:
+    """The pinned base image for a guest architecture (``arm64`` or ``amd64``)."""
+    try:
+        return BASE_IMAGES[arch]
+    except KeyError:
+        raise ValueError(f"no base image for architecture {arch!r} (only {', '.join(BASE_IMAGES)})") from None
 
 
 def default_vm_home() -> Path:
@@ -223,14 +254,148 @@ def parse_sha512sums(text: str) -> dict[str, str]:
     return sums
 
 
-Opener = Callable[[str], AbstractContextManager[IO[bytes]]]
+# Called as ``opener(url)``, or ``opener(url, start=n)`` to ask for the bytes from offset n on.
+Opener = Callable[..., AbstractContextManager[IO[bytes]]]
+
+# HTTP answers that can go away by themselves (a busy server or a proxy on the way).
+_RETRY_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
+_CHUNK = 1 << 20
+_MAX_CONNECTIONS = 100  # per download, however much each one adds
 
 
-def _default_opener(url: str) -> AbstractContextManager[IO[bytes]]:
+class _Restart(Exception):
+    """The server answered a resumed download with another range than the one asked for."""
+
+
+def _default_opener(url: str, start: int = 0) -> AbstractContextManager[IO[bytes]]:
+    """Open ``url`` (HTTPS only). With ``start`` it asks for the bytes from that offset on (an
+    HTTP range request); the server may still send the whole file (see ``_body_start``)."""
     if not url.startswith("https://"):
         raise ImageError(f"refusing to download over plain HTTP: {url}")
-    request = urllib.request.Request(url, headers={"User-Agent": "keyhold-vm-tools"})
+    headers = {"User-Agent": "keyhold-vm-tools"}
+    if start:
+        headers["Range"] = f"bytes={int(start)}-"
+    request = urllib.request.Request(url, headers=headers)
     return urllib.request.urlopen(request, timeout=60)  # noqa: S310 - https only, checked above
+
+
+def _body_start(response: Any, start: int) -> int:
+    """Where in the file the body of ``response`` begins: ``start`` when the server sent the range
+    asked for (206 Partial Content), 0 when it sent the whole file. A response without a status
+    (a test stand-in) is the whole file."""
+    if not start or getattr(response, "status", None) != 206:
+        return 0
+    content_range = str(response.headers.get("Content-Range", "")).strip()
+    match = re.fullmatch(r"bytes (\d+)-\d+/(?:\d+|\*)", content_range)
+    if match is None or int(match.group(1)) != start:
+        raise _Restart(f"asked for the bytes from {start} on, got Content-Range {content_range!r}")
+    return start
+
+
+def _retry_reason(exc: BaseException) -> str | None:
+    """Why a connection failed, if trying again may help (a reset, a timeout, a cut-off body, a
+    temporary HTTP error); None if it cannot (for example HTTP 404)."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}" if exc.code in _RETRY_HTTP else None
+    if isinstance(exc, (OSError, http.client.HTTPException)):
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+def _backoff(failures: int) -> float:
+    return min(30.0, 2.0**failures)
+
+
+def _read_small(
+    open_url: Opener,
+    url: str,
+    *,
+    attempts: int,
+    sleep: Callable[[float], None],
+    notice: Callable[[str], None] | None,
+) -> bytes:
+    """Read a small file such as SHA512SUMS, trying up to ``attempts`` times."""
+    for attempt in range(1, attempts + 1):
+        try:
+            with open_url(url) as response:
+                return response.read()
+        except (OSError, http.client.HTTPException) as exc:
+            reason = _retry_reason(exc)
+            if reason is None or attempt == attempts:
+                raise ImageError(f"could not download {url}: {reason or exc}") from exc
+            wait = _backoff(attempt)
+            if notice is not None:
+                notice(f"{reason}; trying again in {wait:.0f} s")
+            sleep(wait)
+    raise AssertionError("unreachable")
+
+
+def _download(
+    open_url: Opener,
+    url: str,
+    part: Path,
+    size: int | None,
+    *,
+    attempts: int,
+    sleep: Callable[[float], None],
+    notice: Callable[[str], None] | None,
+    progress: Callable[[int, int | None], None] | None,
+) -> None:
+    """Download ``url`` into ``part``, starting after the bytes ``part`` already holds. A
+    connection that drops is resumed from what reached the disk; the download gives up after
+    ``attempts`` failed connections in a row that added nothing (``part`` keeps what arrived)."""
+    have = part.stat().st_size if part.exists() else 0
+    if size is not None and have > size:
+        part.unlink()
+        have = 0
+    stalls = 0
+    for _ in range(_MAX_CONNECTIONS):
+        if size is not None and have == size:
+            return
+        before = have
+        too_big = False
+        try:
+            with open_url(url, start=have) if have else open_url(url) as response:
+                have = _body_start(response, have)
+                with open(part, "ab" if have else "wb") as out:
+                    while block := response.read(_CHUNK):
+                        if size is not None and have + len(block) > size:
+                            too_big = True
+                            break
+                        out.write(block)
+                        have += len(block)
+                        if progress is not None:
+                            progress(have, size)
+            if too_big:
+                part.unlink(missing_ok=True)
+                raise ImageError(f"{url} is larger than the expected {size} bytes; the download was discarded")
+            if size is None or have == size:
+                return
+            reason = f"the connection closed after {have} of {size} bytes"
+        except _Restart as exc:
+            part.unlink(missing_ok=True)
+            have, reason = 0, str(exc)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 416:  # 416: the range starts past the end, so the partial file is wrong
+                if (reason := _retry_reason(exc)) is None:
+                    raise ImageError(f"could not download {url}: HTTP {exc.code}") from exc
+            else:
+                part.unlink(missing_ok=True)
+                have, reason = 0, "HTTP 416 for the resumed range"
+        except (OSError, http.client.HTTPException) as exc:
+            reason = _retry_reason(exc) or str(exc)
+            have = part.stat().st_size if part.exists() else 0  # what reached the disk
+        stalls = 0 if have > before else stalls + 1
+        if stalls >= attempts:
+            raise ImageError(
+                f"could not download {url}: {reason}. Gave up after {attempts} tries in a row without"
+                f" progress; run the command again to resume from {have} bytes"
+            )
+        wait = _backoff(stalls)
+        if notice is not None:
+            notice(f"{reason}; resuming at {have >> 20} MB in {wait:.0f} s")
+        sleep(wait)
+    raise ImageError(f"could not download {url} in {_MAX_CONNECTIONS} connections; run the command again to resume")
 
 
 def verify_base_image(path: Path, image: BaseImage = DEBIAN_13_ARM64) -> bool:
@@ -245,13 +410,24 @@ def fetch_base_image(
     opener: Opener | None = None,
     check_published_sums: bool = True,
     progress: Callable[[int, int | None], None] | None = None,
+    notice: Callable[[str], None] | None = None,
+    attempts: int = 6,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Path:
     """Download ``image`` into the VM home unless a verified copy is already there.
 
     The download goes to ``<name>.part`` and is renamed only after its SHA512 matches the pinned
-    value. With ``check_published_sums`` the pinned value must also appear in the build's
-    published SHA512SUMS, so a typo in the pin is caught before 300 MB are downloaded.
+    value; a file that does not match is discarded. With ``check_published_sums`` the pinned
+    value must also appear in the build's published SHA512SUMS, so a typo in the pin is caught
+    before 300 MB are downloaded.
+
+    A dropped connection is resumed with an HTTP range request for the bytes after those already
+    in ``<name>.part``, as is a ``.part`` left by an earlier run. After ``attempts`` failed
+    connections in a row that add nothing it gives up and keeps the ``.part``, so running it
+    again resumes. ``notice`` hears about each retry.
     """
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
     open_url = opener or _default_opener
     home.ensure()
     dest = home.base_image(image)
@@ -262,22 +438,16 @@ def fetch_base_image(
         os.replace(dest, bad)
 
     if check_published_sums:
-        with open_url(image.sums_url) as response:
-            published = parse_sha512sums(response.read().decode("utf-8", errors="replace"))
+        sums = _read_small(open_url, image.sums_url, attempts=attempts, sleep=sleep, notice=notice)
+        published = parse_sha512sums(sums.decode("utf-8", errors="replace"))
         if published.get(image.filename) != image.sha512:
             raise ImageError(f"the published SHA512SUMS do not list {image.filename} with the pinned hash")
 
     part = dest.with_name(dest.name + ".part")
-    digest = hashlib.sha512()
-    received = 0
-    with open_url(image.url) as response, open(part, "wb") as out:
-        while block := response.read(1 << 20):
-            digest.update(block)
-            out.write(block)
-            received += len(block)
-            if progress is not None:
-                progress(received, image.size)
-    if digest.hexdigest() != image.sha512:
+    _download(
+        open_url, image.url, part, image.size, attempts=attempts, sleep=sleep, notice=notice, progress=progress
+    )
+    if sha512_file(part) != image.sha512:
         part.unlink(missing_ok=True)
         raise ImageError(f"SHA512 mismatch for {image.filename}; the download was discarded")
     os.replace(part, dest)
@@ -305,8 +475,11 @@ class GoldenConfig:
     hostname: str = "keyhold-demo"
     probe_user: str = "probe"
     instance_id: str = "keyhold-golden"
+    arch: str = "arm64"  # the guest's architecture: decides the serial port's name
 
     def __post_init__(self) -> None:
+        if self.arch not in GUEST_ARCHES:
+            raise ValueError(f"arch must be one of {', '.join(GUEST_ARCHES)}")
         key = self.probe_public_key.strip()
         if not re.fullmatch(r"(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+( [^\n]*)?", key):
             raise ValueError("probe_public_key must be one OpenSSH public key line")
@@ -318,6 +491,11 @@ class GoldenConfig:
             raise ValueError("probe_user must be a normal user name")
         if not re.fullmatch(r"[0-9a-f]{8,64}", self.page_token):
             raise ValueError("page_token must be hex")
+
+    @property
+    def serial_tty(self) -> str:
+        """The guest's serial port (``ttyAMA0`` on arm64, ``ttyS0`` on amd64)."""
+        return SERIAL_TTY[self.arch]
 
 
 def page_html(token: str) -> str:
@@ -379,18 +557,22 @@ _GETTY_NOCLEAR = """[Service]
 TTYVTDisallocate=no
 """
 
+# The guest scripts and settings below name the serial port as @SERIAL@; render_user_data puts in
+# the guest architecture's port (keyhold.console.qemu.SERIAL_TTY).
+SERIAL_PLACEHOLDER = "@SERIAL@"
+
 # The last console= is /dev/console, so systemd's boot status goes to the screen. loglevel=4 keeps
 # routine kernel messages (audit notices, device probes) off the screen, where they would scroll
 # away prompts such as the emergency-mode password prompt; the journal copy on serial keeps them.
 _GRUB_DEFAULTS = """# Boot status on the screen (tty0) and kernel warnings on both consoles; GRUB on the firmware console.
-GRUB_CMDLINE_LINUX="console=ttyAMA0,115200 console=tty0 consoleblank=0 loglevel=4"
+GRUB_CMDLINE_LINUX="console=@SERIAL@,115200 console=tty0 consoleblank=0 loglevel=4"
 GRUB_TERMINAL=console
 """
 
 # Copies journal messages to the serial port: the operator's log of what the guest did.
 _JOURNALD_SERIAL = """[Journal]
 ForwardToConsole=yes
-TTYPath=/dev/ttyAMA0
+TTYPath=/dev/@SERIAL@
 MaxLevelConsole=info
 """
 
@@ -401,7 +583,7 @@ set -u
 udevadm settle --timeout=30 || true
 dev=$(blkid -L {PLANT_LABEL} 2>/dev/null) || exit 0
 mnt=$(mktemp -d)
-mount -o ro "$dev" "$mnt" || {{ echo "KEYHOLD-PLANT-FAILED mount" > /dev/ttyAMA0; exit 1; }}
+mount -o ro "$dev" "$mnt" || {{ echo "KEYHOLD-PLANT-FAILED mount" > /dev/@SERIAL@; exit 1; }}
 cp "$mnt/plant.sh" /run/plant.sh
 fault=$(tr -cd 'a-z0-9_-' < "$mnt/fault-id")
 umount "$mnt"
@@ -410,7 +592,7 @@ status=FAILED
 if bash -euo pipefail /run/plant.sh > /run/plant.log 2>&1; then
   status=OK
 fi
-sed 's/^/plant: /' /run/plant.log > /dev/ttyAMA0
+sed 's/^/plant: /' /run/plant.log > /dev/@SERIAL@
 rm -f /run/plant.sh /run/plant.log
 systemctl disable keyhold-plant.service > /dev/null 2>&1 || true
 rm -f /etc/systemd/system/keyhold-plant.service /usr/local/sbin/keyhold-plant
@@ -418,7 +600,7 @@ rm -f /etc/systemd/system/keyhold-plant.service /usr/local/sbin/keyhold-plant
 journalctl --relinquish-var > /dev/null 2>&1 || true
 find /var/log/journal -type f -name '*.journal*' -delete 2>/dev/null || true
 sync
-echo "KEYHOLD-PLANT-$status $fault" > /dev/ttyAMA0
+echo "KEYHOLD-PLANT-$status $fault" > /dev/@SERIAL@
 systemctl poweroff --no-block
 """
 
@@ -454,12 +636,16 @@ update-grub
 touch /etc/cloud/cloud-init.disabled
 rm -f /usr/local/sbin/golden-finish
 sync
-echo "{GOLDEN_MARKER}" > /dev/ttyAMA0
+echo "{GOLDEN_MARKER}" > /dev/@SERIAL@
 """
 
 
 def render_user_data(cfg: GoldenConfig) -> str:
     """cloud-config for the golden boot (JSON is valid YAML, so no YAML library is needed)."""
+
+    def tty(text: str) -> str:
+        return text.replace(SERIAL_PLACEHOLDER, cfg.serial_tty)
+
     files = [
         {"path": "/srv/keyhold-demo/index.html", "permissions": "0644", "content": page_html(cfg.page_token)},
         {"path": "/usr/local/sbin/demo-page", "permissions": "0755", "content": _PAGE_RESPONDER},
@@ -470,11 +656,15 @@ def render_user_data(cfg: GoldenConfig) -> str:
             "permissions": "0644",
             "content": _GETTY_NOCLEAR,
         },
-        {"path": "/etc/default/grub.d/90-console.cfg", "permissions": "0644", "content": _GRUB_DEFAULTS},
-        {"path": "/etc/systemd/journald.conf.d/serial.conf", "permissions": "0644", "content": _JOURNALD_SERIAL},
-        {"path": "/usr/local/sbin/keyhold-plant", "permissions": "0755", "content": _PLANT_HOOK},
+        {"path": "/etc/default/grub.d/90-console.cfg", "permissions": "0644", "content": tty(_GRUB_DEFAULTS)},
+        {
+            "path": "/etc/systemd/journald.conf.d/serial.conf",
+            "permissions": "0644",
+            "content": tty(_JOURNALD_SERIAL),
+        },
+        {"path": "/usr/local/sbin/keyhold-plant", "permissions": "0755", "content": tty(_PLANT_HOOK)},
         {"path": "/etc/systemd/system/keyhold-plant.service", "permissions": "0644", "content": _PLANT_UNIT},
-        {"path": "/usr/local/sbin/golden-finish", "permissions": "0755", "content": _GOLDEN_FINISH},
+        {"path": "/usr/local/sbin/golden-finish", "permissions": "0755", "content": tty(_GOLDEN_FINISH)},
     ]
     config: dict[str, Any] = {
         "hostname": cfg.hostname,
@@ -627,6 +817,7 @@ class GoldenInfo:
     page_sha256: str
     page_marker: str
     built_at: float
+    arch: str = "arm64"  # golden.json files written before amd64 guests existed are arm64
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True) + "\n"
@@ -640,11 +831,27 @@ def load_golden_info(home: VMHome) -> GoldenInfo:
     return GoldenInfo(**data)
 
 
+def check_arch(home: VMHome, runner: DockerRunner) -> str:
+    """The guest architecture of this VM home's golden image, after checking that the runner
+    image has the same one (a runner carries QEMU and firmware for its own architecture only).
+    Raises ``ImageError`` on a mismatch."""
+    golden = load_golden_info(home).arch
+    runner_arch = runner.arch()
+    if golden != runner_arch:
+        raise ImageError(
+            f"the images in {home.root} are for {golden} guests, but the runner image {runner.image} is "
+            f"{runner_arch}; use a VM home for {runner_arch} (KEYHOLD_VM_HOME) or a {golden} runner image "
+            "(KEYHOLD_RUNNER_IMAGE)"
+        )
+    return golden
+
+
 def build_golden(
     home: VMHome,
     runner: DockerRunner,
     *,
-    image: BaseImage = DEBIAN_13_ARM64,
+    image: BaseImage | None = None,
+    arch: str | None = None,
     timeout: float = 1500.0,
     force: bool = False,
     keygen: Callable[..., subprocess.CompletedProcess] = subprocess.run,
@@ -656,10 +863,16 @@ def build_golden(
     screen and serial console settings and the fault-planting hook, then switches cloud-init off
     and powers the guest down. Rebuilding (``force``) deletes the fault images built on the old
     golden image, because their backing file changes.
+
+    ``arch`` defaults to the runner image's architecture and ``image`` to that architecture's
+    pinned Debian image. An existing golden image of another architecture is an error unless
+    ``force`` rebuilds it.
     """
+    arch = arch or runner.arch()
+    image = image or base_image_for(arch)
     with build_lock(home):
         return _build_golden_locked(
-            home, runner, image=image, timeout=timeout, force=force, keygen=keygen, vm_factory=vm_factory
+            home, runner, image=image, arch=arch, timeout=timeout, force=force, keygen=keygen, vm_factory=vm_factory
         )
 
 
@@ -668,6 +881,7 @@ def _build_golden_locked(
     runner: DockerRunner,
     *,
     image: BaseImage,
+    arch: str,
     timeout: float,
     force: bool,
     keygen: Callable[..., subprocess.CompletedProcess],
@@ -679,7 +893,13 @@ def _build_golden_locked(
         raise ImageError(f"{base.name} is missing or does not match its SHA512; run tools/vm/vm.py fetch")
     if home.golden_disk.exists():
         if not force:
-            return load_golden_info(home)
+            info = load_golden_info(home)
+            if info.arch != arch:
+                raise ImageError(
+                    f"the golden image in {home.root} is for {info.arch} guests, not {arch}; "
+                    "use another VM home (KEYHOLD_VM_HOME) or rebuild with --force"
+                )
+            return info
         for disk in home.faults_dir.glob("*.qcow2"):
             _force_unlink(disk)
         _force_unlink(home.golden_disk)
@@ -688,6 +908,7 @@ def _build_golden_locked(
         probe_public_key=ensure_probe_key(home, run=keygen),
         console_password=ensure_console_password(home),
         page_token=secrets.token_hex(8),
+        arch=arch,
     )
     work = home.golden_dir / "build"
     seed_files = write_seed_dir(work / "seed", cfg)
@@ -700,6 +921,7 @@ def _build_golden_locked(
         disk=building,
         extra_drives=[seed_iso],
         stay_on_poweroff=False,
+        arch=arch,
     )
     try:
         serial = vm.run_to_poweroff(timeout)
@@ -724,6 +946,7 @@ def _build_golden_locked(
         page_sha256=sha256_hex(page_html(cfg.page_token)),
         page_marker=PAGE_MARKER,
         built_at=time.time(),
+        arch=arch,
     )
     home.golden_info_file.write_text(info.to_json())
     return info
@@ -750,6 +973,7 @@ def new_run(home: VMHome, runner: DockerRunner, fault_id: str | None, run_id: st
     if not backing.is_file():
         what = "golden image" if fault_id is None else f"fault image {fault_id}"
         raise ImageError(f"the {what} is not built yet; see tools/vm/README.md")
+    check_arch(home, runner)
     run_dir = home.run_dir(run_id)
     if run_dir.exists():
         raise ImageError(f"run {run_id} already exists")

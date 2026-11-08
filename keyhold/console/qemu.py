@@ -13,10 +13,18 @@ Two pieces:
   connections but cannot open connections of its own, so an agent at the keyboard cannot reach
   the internet from it.
 
-The guest is a 64-bit Arm machine (``virt``) with UEFI firmware, a ``ramfb`` framebuffer (the
-firmware, GRUB and the Linux console all draw on it), a USB keyboard for the firmware and GRUB and
-a virtio keyboard for Linux. With KVM available on an
-aarch64 docker host it uses KVM; otherwise TCG emulation.
+The guest has the runner image's architecture (``DockerRunner.arch``) and boots UEFI firmware:
+
+- ``arm64``: a 64-bit Arm ``virt`` machine with AAVMF, a ``ramfb`` framebuffer (the firmware, GRUB
+  and the Linux console all draw on it), a USB keyboard for the firmware and GRUB and a virtio
+  keyboard for Linux (the Debian cloud kernel has no USB support). Serial port ``ttyAMA0``.
+- ``amd64``: a ``q35`` PC with OVMF, a standard VGA card (firmware, GRUB and the Linux console draw
+  on it) and the PC's own PS/2 keyboard, which the firmware, GRUB and Linux all read. Serial port
+  ``ttyS0``.
+
+It uses KVM when the runner runs natively on a docker host where QEMU can use /dev/kvm
+(``DockerRunner.kvm_available``); otherwise TCG emulation. A guest that does not start with KVM
+anyway is started again under TCG (``QemuVM.start``).
 """
 
 from __future__ import annotations
@@ -32,12 +40,13 @@ from pathlib import Path
 from typing import Any
 
 from keyhold.console.base import ConsoleClosed, ConsoleError, normalize_chord, text_to_chords
-from keyhold.console.docker import LOOPBACK, DockerError, DockerRunner
+from keyhold.console.docker import GUEST_ARCHES, LOOPBACK, DockerError, DockerRunner
 from keyhold.console.qmp import QMPClient, QMPConnectionError, QMPError
 
 __all__ = [
-    "FIRMWARE_CODE",
-    "FIRMWARE_VARS",
+    "FIRMWARE",
+    "Firmware",
+    "SERIAL_TTY",
     "QMP_CONSOLE_PORT",
     "QMP_CONTROL_PORT",
     "SSH_FORWARD_PORT",
@@ -50,11 +59,30 @@ __all__ = [
     "VMEndpoints",
 ]
 
-# The Secure Boot build of the firmware, because it has no built-in UEFI shell: with a shell, an
-# agent could edit the bootloader files on the EFI partition and walk around a GRUB password. With
-# the plain variable store (no keys enrolled) Secure Boot stays off, so the guest boots as usual.
-FIRMWARE_CODE = "/usr/share/AAVMF/AAVMF_CODE.secboot.fd"
-FIRMWARE_VARS = "/usr/share/AAVMF/AAVMF_VARS.fd"
+
+
+@dataclass(frozen=True)
+class Firmware:
+    """UEFI firmware in the runner image: the read-only code and the template variable store each
+    guest gets a copy of."""
+
+    code: str
+    vars: str
+
+
+# The Secure Boot builds of the firmware, because they have no built-in UEFI shell: with a shell,
+# an agent could edit the bootloader files on the EFI partition and walk around a GRUB password.
+# With the plain variable store (no keys enrolled) Secure Boot stays off, so the guest boots as
+# usual. Debian's x86 Secure Boot build needs SMM (see qemu_argv). Checked for both builds in
+# Debian 13 (edk2 2025.02): the Secure Boot build holds no shell application and its boot manager
+# offers none, while the plain build boots straight into "Shell>" when no disk is bootable.
+FIRMWARE = {
+    "arm64": Firmware(code="/usr/share/AAVMF/AAVMF_CODE.secboot.fd", vars="/usr/share/AAVMF/AAVMF_VARS.fd"),
+    "amd64": Firmware(code="/usr/share/OVMF/OVMF_CODE_4M.secboot.fd", vars="/usr/share/OVMF/OVMF_VARS_4M.fd"),
+}
+QEMU_BINARY = {"arm64": "qemu-system-aarch64", "amd64": "qemu-system-x86_64"}
+# The guest's name for its first serial port, where its kernel messages and journal go.
+SERIAL_TTY = {"arm64": "ttyAMA0", "amd64": "ttyS0"}
 QMP_CONSOLE_PORT = 4444
 QMP_CONTROL_PORT = 4445
 SSH_FORWARD_PORT = 2222  # container port relayed to the guest's port 22
@@ -85,35 +113,61 @@ class GuestSpec:
     forward_listen: str = "127.0.0.1"
     forwards: Mapping[int, int] = field(default_factory=lambda: {SSH_LOCAL_PORT: 22, HTTP_LOCAL_PORT: 80})
     stay_on_poweroff: bool = True  # keep QEMU (and the screen) after the guest powers off
-    firmware_code: str = FIRMWARE_CODE
+    arch: str = "arm64"  # "arm64" or "amd64"
+    firmware_code: str = ""  # default: FIRMWARE[arch].code
 
     def __post_init__(self) -> None:
+        if self.arch not in GUEST_ARCHES:
+            raise ValueError(f"arch must be one of {', '.join(GUEST_ARCHES)}")
         if self.accel not in ("tcg", "kvm"):
             raise ValueError("accel must be 'tcg' or 'kvm'")
         if self.memory_mb < 256 or self.cpus < 1:
             raise ValueError("a guest needs at least 256 MB and one CPU")
 
 
-def qemu_argv(spec: GuestSpec) -> list[str]:
-    """The qemu-system-aarch64 command line for ``spec``."""
+def _machine_args(spec: GuestSpec) -> list[str]:
+    if spec.arch == "amd64":
+        # smm=on and the secure pflash: Debian's Secure Boot OVMF build refuses to run without SMM.
+        machine = ["-machine", "q35,smm=on", "-global", "driver=cfi.pflash01,property=secure,value=on"]
+        if spec.accel == "kvm":
+            return [*machine, "-accel", "kvm", "-cpu", "host"]
+        return [*machine, "-accel", "tcg,thread=multi,tb-size=256", "-cpu", "max"]
     if spec.accel == "kvm":
-        machine = ["-machine", "virt,gic-version=host", "-accel", "kvm", "-cpu", "host"]
-    else:
-        # pauth-impdef: a cheap pointer-authentication algorithm, much faster under emulation.
-        machine = [
-            "-machine",
-            "virt,gic-version=3",
-            "-accel",
-            "tcg,thread=multi,tb-size=256",
-            "-cpu",
-            "max,pauth-impdef=on",
-        ]
+        return ["-machine", "virt,gic-version=host", "-accel", "kvm", "-cpu", "host"]
+    # pauth-impdef: a cheap pointer-authentication algorithm, much faster under emulation.
+    return ["-machine", "virt,gic-version=3", "-accel", "tcg,thread=multi,tb-size=256", "-cpu", "max,pauth-impdef=on"]
+
+
+def _screen_and_keyboard_args(spec: GuestSpec) -> list[str]:
+    if spec.arch == "amd64":
+        # Standard VGA: OVMF, GRUB and the Linux console (on the firmware's framebuffer) draw on
+        # it; 800x600 like the arm64 screen. The q35 PC's PS/2 keyboard needs no device: the
+        # firmware, GRUB and Linux all read it.
+        return ["-device", "VGA,xres=800,yres=600"]
+    return [
+        "-device",
+        "ramfb",
+        # Two keyboards: the firmware and GRUB read the USB one; the Debian cloud kernel has no
+        # USB support, so Linux reads the virtio one. QEMU sends keys to whichever the running
+        # software has activated.
+        "-device",
+        "qemu-xhci,id=xhci",
+        "-device",
+        "usb-kbd,bus=xhci.0",
+        "-device",
+        "virtio-keyboard-pci",
+    ]
+
+
+def qemu_argv(spec: GuestSpec) -> list[str]:
+    """The QEMU command line for ``spec`` (qemu-system-aarch64 or qemu-system-x86_64)."""
+    firmware_code = spec.firmware_code or FIRMWARE[spec.arch].code
     argv = [
-        "qemu-system-aarch64",
+        QEMU_BINARY[spec.arch],
         "-nodefaults",
         "-name",
         spec.name,
-        *machine,
+        *_machine_args(spec),
         "-smp",
         str(spec.cpus),
         "-m",
@@ -121,7 +175,7 @@ def qemu_argv(spec: GuestSpec) -> list[str]:
         "-rtc",
         "base=utc",
         "-drive",
-        f"if=pflash,format=raw,readonly=on,file={spec.firmware_code}",
+        f"if=pflash,format=raw,readonly=on,file={firmware_code}",
         "-drive",
         f"if=pflash,format=raw,file={spec.vars}",
         "-drive",
@@ -147,17 +201,7 @@ def qemu_argv(spec: GuestSpec) -> list[str]:
         f"virtio-net-pci,netdev=net0,mac={GUEST_MAC},romfile=",
         "-device",
         "virtio-rng-pci",
-        "-device",
-        "ramfb",
-        # Two keyboards: the firmware and GRUB read the USB one; the Debian cloud kernel has no
-        # USB support, so Linux reads the virtio one. QEMU sends keys to whichever the running
-        # software has activated.
-        "-device",
-        "qemu-xhci,id=xhci",
-        "-device",
-        "usb-kbd,bus=xhci.0",
-        "-device",
-        "virtio-keyboard-pci",
+        *_screen_and_keyboard_args(spec),
         "-display",
         "none",
     ]
@@ -342,6 +386,8 @@ class QemuVM:
 
     ``run_dir`` (under the runner's VM home) receives the UEFI variable store, the serial log and
     the console's screenshots. ``disk`` and ``extra_drives`` are host paths under the VM home.
+    ``arch`` is the guest's architecture; by default the runner image's (``DockerRunner.arch``),
+    since the runner only carries QEMU and firmware for its own architecture.
 
     Use ``start()``, then ``console()`` for a ``QemuConsole``, and ``shutdown()`` (clean: ACPI
     power button, then quit) or ``kill()`` (immediate). ``run_to_poweroff()`` is for prepare boots
@@ -359,6 +405,7 @@ class QemuVM:
         memory_mb: int = 1024,
         cpus: int | None = None,
         accel: str = "auto",
+        arch: str | None = None,
         stay_on_poweroff: bool = True,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -367,6 +414,8 @@ class QemuVM:
             raise ValueError("VM name must be 1-63 characters: letters, digits, _ . -")
         if accel not in ("auto", "tcg", "kvm"):
             raise ValueError("accel must be auto, tcg or kvm")
+        if arch is not None and arch not in GUEST_ARCHES:
+            raise ValueError(f"arch must be one of {', '.join(GUEST_ARCHES)}")
         self.runner = runner
         self.name = name
         self.run_dir = Path(run_dir)
@@ -375,11 +424,13 @@ class QemuVM:
         self.memory_mb = memory_mb
         self._cpus = cpus
         self._accel = accel
+        self._arch = arch
         self.stay_on_poweroff = stay_on_poweroff
         self._sleep = sleep
         self._clock = clock
         self.endpoints: VMEndpoints | None = None
         self.accel: str | None = None
+        self.kvm_fallback: str | None = None  # why KVM failed when start() fell back to TCG
         self._control: QMPClient | None = None
 
     # ------------------------------------------------------------------ paths
@@ -396,6 +447,18 @@ class QemuVM:
     def shot_dir(self) -> Path:
         return self.run_dir / "shots"
 
+    @property
+    def arch(self) -> str:
+        """The guest's architecture: the one given, else the runner image's."""
+        if self._arch is None:
+            self._arch = self.runner.arch()
+        return self._arch
+
+    @property
+    def serial_tty(self) -> str:
+        """The guest's name for the serial port that ``serial_log`` records."""
+        return SERIAL_TTY[self.arch]
+
     def spec(self) -> GuestSpec:
         accel = self.accel or ("kvm" if self._accel == "kvm" else "tcg")
         cpus = self._cpus or (2 if accel == "kvm" else 4)
@@ -410,6 +473,7 @@ class QemuVM:
             cpus=cpus,
             accel=accel,
             stay_on_poweroff=self.stay_on_poweroff,
+            arch=self.arch,
         )
 
     def container_argv(self) -> list[str]:
@@ -427,29 +491,55 @@ class QemuVM:
     # ------------------------------------------------------------------ lifecycle
 
     def start(self, *, wait: float = 60.0) -> VMEndpoints:
-        """Start the container and wait until QEMU answers on its control socket."""
+        """Start the container and wait until QEMU answers on its control socket.
+
+        With ``accel="auto"`` the guest uses KVM when ``DockerRunner.kvm_available`` says so. If
+        it then does not start with KVM (the probe creates a VM but no vCPU, so a host can pass
+        it and still fail here), it is started again under TCG: ``kvm_fallback`` keeps the KVM
+        error and the runner's later guests use TCG. A guest given ``accel="kvm"`` does not fall
+        back."""
         if self.endpoints is not None:
             raise ConsoleError(f"{self.name} is already started")
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.shot_dir.mkdir(parents=True, exist_ok=True)
+        if not self.vars_file.exists():
+            self.runner.tool(["cp", FIRMWARE[self.arch].vars, self.runner.container_path(self.vars_file)])
+        self.kvm_fallback = None
+        if self._accel != "auto":
+            return self._launch(self._accel, wait)
+        if not self.runner.kvm_available():
+            return self._launch("tcg", wait)
+        try:
+            return self._launch("kvm", wait)
+        except ConsoleError as kvm_error:
+            try:
+                endpoints = self._launch("tcg", wait)
+            except ConsoleError as tcg_error:
+                raise ConsoleError(f"{tcg_error}\nIt did not start with KVM either: {kvm_error}") from tcg_error
+            self.kvm_fallback = str(kvm_error)
+            self.runner.disable_kvm()
+            return endpoints
+
+    def _launch(self, accel: str, wait: float) -> VMEndpoints:
+        """Start the container with ``accel`` and connect to QEMU's control socket. On failure
+        the container is removed."""
+        self.accel = accel
         if self.serial_log.exists():
             self.serial_log.unlink()
-        if not self.vars_file.exists():
-            self.runner.tool(["cp", FIRMWARE_VARS, self.runner.container_path(self.vars_file)])
-        if self._accel == "auto":
-            self.accel = "kvm" if self.runner.kvm_available() else "tcg"
-        else:
-            self.accel = self._accel
-        self.runner.remove(self.name)  # a container left over from a crashed run
+        self.runner.remove(self.name)  # a container left over from a crashed run or a failed start
         ports = [QMP_CONSOLE_PORT, QMP_CONTROL_PORT, SSH_FORWARD_PORT, HTTP_FORWARD_PORT]
-        self.runner.start(
-            self.name,
-            self.container_argv(),
-            publish=ports,
-            kvm=self.accel == "kvm",
-            writable=[self.run_dir, self.disk.parent],
-            memory_mb=self.memory_mb,
-        )
+        try:
+            self.runner.start(
+                self.name,
+                self.container_argv(),
+                publish=ports,
+                kvm=accel == "kvm",
+                writable=[self.run_dir, self.disk.parent],
+                memory_mb=self.memory_mb,
+            )
+        except DockerError:
+            self.runner.remove(self.name)  # docker can create the container and fail to start it
+            raise
         try:
             self.endpoints = VMEndpoints(
                 host=LOOPBACK,

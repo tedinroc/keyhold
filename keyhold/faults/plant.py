@@ -18,7 +18,15 @@ from collections.abc import Callable
 from pathlib import Path
 
 from keyhold.console.docker import DockerRunner
-from keyhold.console.image import PLANT_LABEL, ImageError, VMHome, build_iso, build_lock, create_overlay
+from keyhold.console.image import (
+    PLANT_LABEL,
+    ImageError,
+    VMHome,
+    build_iso,
+    build_lock,
+    check_arch,
+    create_overlay,
+)
 from keyhold.console.qemu import QemuVM
 from keyhold.faults import Fault
 
@@ -74,6 +82,7 @@ def _plant_locked(
         return target
     if not home.golden_disk.is_file():
         raise ImageError("no golden image yet; run tools/vm/vm.py golden first")
+    arch = check_arch(home, runner)
 
     work = home.faults_dir / "build" / fault.id
     shutil.rmtree(work, ignore_errors=True)
@@ -87,6 +96,7 @@ def _plant_locked(
         disk=building,
         extra_drives=[iso],
         stay_on_poweroff=False,
+        arch=arch,
     )
     try:
         serial = vm.run_to_poweroff(timeout)

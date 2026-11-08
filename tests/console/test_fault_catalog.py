@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from console_fakes import write_golden_info
 
 from keyhold.console.image import PLANT_LABEL, ImageError, VMHome
 from keyhold.console.qemu import GUEST_MAC
@@ -141,6 +142,7 @@ def planting(fake_docker):
     docker, runner = fake_docker
     home = VMHome(runner.vm_home).ensure()
     home.golden_disk.write_bytes(b"golden")
+    write_golden_info(home.root)
     FakePlantVM.instances = []
     return home, runner, docker
 

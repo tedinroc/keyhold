@@ -22,6 +22,7 @@ from PIL import Image
 from keyhold.console.docker import DockerRunner
 from keyhold.console.image import (
     VMHome,
+    base_image_for,
     build_golden,
     load_golden_info,
     new_run_vm,
@@ -49,7 +50,8 @@ def env(request):
         pytest.skip("docker is not available")
     if not runner.image_present():
         pytest.skip(f"runner image {runner.image} missing; build it with: uv run python tools/vm/vm.py runner")
-    if not verify_base_image(home.base_image()):
+    image = base_image_for(runner.arch())
+    if not verify_base_image(home.base_image(image), image):
         pytest.skip("base image missing; download it with: uv run python tools/vm/vm.py fetch")
     build_golden(home, runner)
     return home, runner
@@ -104,12 +106,28 @@ def _page_sha256(endpoints: VMEndpoints) -> str | None:
         return None
 
 
-def _login(console, password: str) -> None:
+def _login(vm: QemuVM, console, password: str, attempts: int = 3) -> None:
+    """Log in as root on the screen console and wait for the PAM session on the serial log.
+
+    The login prompt is drawn on the screen only, so the timing is a guess. Under emulation (an
+    amd64 guest on an arm64 host) the screen's getty can lag the serial one by many seconds and
+    discard keys typed before it is ready, and a password typed before its prompt is lost. So
+    each attempt waits like the fix scripts do, and a failed attempt is cleared with two Enters
+    (ending a pending password prompt with a failed login) before the next one."""
     time.sleep(3)  # the serial getty can be up a moment before the one on the screen
-    console.type_text("root\n")
-    time.sleep(1)
-    console.type_text(password + "\n")
-    time.sleep(3)  # login, motd and the shell prompt
+    for attempt in range(attempts):
+        mark = len(vm.serial_text())
+        console.type_text("root\n")
+        time.sleep(4)
+        console.type_text(password + "\n")
+        if vm.wait_for_serial(r"session opened for user root", timeout=45, start=mark):
+            time.sleep(3)  # motd and the shell prompt
+            return
+        console.type_text("\n")
+        time.sleep(6)
+        console.type_text("\n")
+        time.sleep(4)
+    raise AssertionError(f"root login failed {attempts} times; serial tail:\n{vm.serial_text()[-1500:]}")
 
 
 def _wait(vm: QemuVM, pattern: str, start: int = 0, timeout: float = BOOT_TIMEOUT) -> re.Match[str]:
@@ -133,9 +151,9 @@ def test_healthy_guest_screen_keyboard_reset_and_clean_shutdown(env) -> None:
             low, high = screen.convert("L").getextrema()
             assert high - low > 100  # text on the screen, not a blank frame
 
-        _login(console, read_console_password(home))
+        _login(vm, console, read_console_password(home))
         mark = len(vm.serial_text())
-        console.type_text("echo KH-TYPED-$((6*7)) > /dev/ttyAMA0\n")
+        console.type_text(f"echo KH-TYPED-$((6*7)) > /dev/{vm.serial_tty}\n")
         _wait(vm, r"KH-TYPED-42", start=mark, timeout=60)
 
         mark = len(vm.serial_text())
@@ -158,7 +176,7 @@ def test_masked_sshd_is_fixed_from_the_keyboard(env) -> None:
         assert _page_sha256(vm.endpoints) == info.page_sha256
 
         console = vm.console()
-        _login(console, read_console_password(home))
+        _login(vm, console, read_console_password(home))
         mark = len(vm.serial_text())
         console.type_text("systemctl unmask ssh.service ssh.socket && systemctl enable --now ssh.service\n")
         _wait(vm, r"Started ssh\.service", start=mark, timeout=120)

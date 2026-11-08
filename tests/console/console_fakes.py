@@ -127,6 +127,14 @@ class FakeDocker:
         self.running: dict[str, bool] = {}
         self.exit_codes: dict[str, int] = {}
         self.kvm = False
+        self.arch = "arm64"  # the runner image's architecture (docker image inspect)
+        self.daemon_arch = "aarch64"  # the docker host's (docker info)
+        self.kvm_probes: list[list[str]] = []
+        # What happens to a guest container given /dev/kvm: "ok"; "docker-fails" (docker creates
+        # the container but cannot start it); "qemu-exits" (QEMU quits at once, so the container
+        # has stopped and has no ports).
+        self.kvm_guest = "ok"
+        self.exited_at_start: set[str] = set()
         self.fail: dict[str, tuple[int, str]] = {}  # docker subcommand -> (exit code, stderr)
         self.exit_after_polls: dict[str, int] = {}  # container -> inspections before it exits
 
@@ -145,12 +153,22 @@ class FakeDocker:
         code = 0
         if sub == "run" and "-d" in argv:
             name = argv[argv.index("--name") + 1]
-            self.running[name] = True
+            kvm_fault = self.kvm_guest if "/dev/kvm" in argv else "ok"
+            self.running[name] = kvm_fault == "ok"
+            if kvm_fault == "docker-fails":
+                err = 'error gathering device information while adding custom device "/dev/kvm"'
+                return subprocess.CompletedProcess(argv, 125, "c0ffee\n", err)
+            if kvm_fault == "qemu-exits":
+                self.exited_at_start.add(name)
+                self.exit_codes[name] = 1
             out = "c0ffee\n"
         elif sub == "run" and "--device" in argv and "sh" in argv:  # kvm probe
+            self.kvm_probes.append(argv)
             code = 0 if self.kvm else 125
         elif sub == "run":
             self._tool(argv[argv.index(RUNNER_IMAGE) + 1 :])
+        elif sub == "port" and argv[2] in self.exited_at_start:
+            code = 1
         elif sub == "port":
             port = int(argv[3].split("/")[0])
             out = f"127.0.0.1:{self.ports.get(port, 40000 + port)}\n"
@@ -170,14 +188,17 @@ class FakeDocker:
                 out = json.dumps(state)
         elif sub == "rm":
             self.running.pop(argv[-1], None)
+            self.exited_at_start.discard(argv[-1])
         elif sub == "logs":
             out = "qemu log line\n"
         elif sub == "ps":
             out = "".join(f"{n}\n" for n in self.running)
         elif sub == "info":
-            out = "aarch64\n" if "{{.Architecture}}" in argv else "29.0\n"
+            out = f"{self.daemon_arch}\n" if "{{.Architecture}}" in argv else "29.0\n"
         elif sub == "image":
             code = 0
+            if "{{.Architecture}}" in argv:
+                out = f"{self.arch}\n"
         return subprocess.CompletedProcess(argv, code, out, "")
 
     def _tool(self, argv: list[str]) -> None:
@@ -191,3 +212,22 @@ class FakeDocker:
 
     def docker_calls(self, sub: str) -> list[list[str]]:
         return [c for c in self.calls if c[1] == sub]
+
+
+def write_golden_info(vm_home: Path, arch: str = "arm64") -> None:
+    """A golden.json as build_golden writes it (no secrets), for tests that fake the golden disk."""
+    golden = Path(vm_home) / "golden"
+    golden.mkdir(parents=True, exist_ok=True)
+    info = {
+        "arch": arch,
+        "base_image": f"debian-13-genericcloud-{arch}-test.qcow2",
+        "base_sha512": "00" * 64,
+        "built_at": 0.0,
+        "console_user": "root",
+        "hostname": "keyhold-demo",
+        "page_marker": "keyhold-demo: the page is being served.",
+        "page_sha256": "11" * 32,
+        "probe_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTestsOnly0000000000000000000 test",
+        "probe_user": "probe",
+    }
+    (golden / "golden.json").write_text(json.dumps(info))

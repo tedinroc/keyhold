@@ -24,7 +24,9 @@ What this proves and what it does not:
 
 - Host: Apple Silicon Mac. Docker through OrbStack; its Linux VM has 18 CPUs and 16 GB.
 - Runner image `keyhold-qemu-runner:2` (`tools/vm/Dockerfile`): Debian trixie-slim with
-  `qemu-system-aarch64`, UEFI firmware, `qemu-img`, `genisoimage` and `socat`.
+  `qemu-system-aarch64`, UEFI firmware, `qemu-img`, `genisoimage` and `socat`. (The image is now
+  `keyhold-qemu-runner:3`, which installs the same packages on arm64 and the x86 ones on amd64;
+  see "x86-64 guests" below.)
 - Acceleration: **TCG emulation, no KVM.** The OrbStack VM has no `/dev/kvm` on this machine:
   `docker run --device /dev/kvm ...` fails with "error gathering device information while adding
   custom device "/dev/kvm": no such file or directory". So QEMU emulates the CPU. All times below
@@ -158,10 +160,162 @@ change that the firewall would refuse fails before any VM boots.
 ## The slow test suite
 
 `uv run pytest -m slow tests/console/test_real_guest.py` also passed on the same images (3 tests,
-2 min 24 s). It boots a healthy guest and checks the screenshot, types a command whose output
-shows up on the serial log, power-cycles back to the login prompt and shuts down cleanly; fixes
-the masked sshd from the keyboard; and checks that a reset of the GRUB-locked guest lands on the
-same prompt.
+2 min 24 s; `runs/real-vm/slow-pytest.log`). It boots a healthy guest and checks the screenshot,
+types a command whose output shows up on the serial log, power-cycles back to the login prompt
+and shuts down cleanly; fixes the masked sshd from the keyboard; and checks that a reset of the
+GRUB-locked guest lands on the same prompt.
+
+## x86-64 guests (for a KVM host)
+
+The hosted demo is meant to run on a Linux x86-64 VM with nested virtualization, where KVM can run
+x86-64 guests. The guest's architecture follows the runner image's, so on such a host the runner
+is amd64 and so are the guests: `qemu-system-x86_64`, machine `q35` with SMM, the Secure Boot
+OVMF build with the plain variable store, standard VGA at 800x600, the PC's PS/2 keyboard, and
+the serial port `ttyS0`. The base image is `debian-13-genericcloud-amd64-20261103-2651.qcow2`
+(341,180,416 bytes), from the same Debian build as the arm64 one; its pinned SHA512 is the one in
+that build's published `SHA512SUMS`. KVM is used when the runner image is native to the docker
+host and the runner's QEMU, in a container given `/dev/kvm`, can start KVM (the probe creates a VM
+on an empty machine and quits); otherwise TCG. A guest that still fails to start with KVM is
+started again under TCG, and later guests skip KVM.
+
+### What was verified, and where
+
+All of this ran on the same Apple Silicon Mac, with an amd64 runner image that docker runs under
+x86-64 emulation (`vm.py runner --platform linux/amd64`, tagged `keyhold-qemu-runner:3-amd64`,
+with its own VM home `var/vm-amd64`). So QEMU itself was emulated and the guests ran under TCG
+inside it. Nothing here ran on an x86-64 host or under KVM.
+
+| Step | Time | Notes |
+|---|---|---|
+| amd64 runner image, first build | 1 min 45 s | under emulation; the per-arch self-checks passed (`qemu-system-x86_64` 10.0.13, the OVMF files) |
+| arm64 runner image `:3` | 1 min 7 s | native |
+| Base image | see note | `vm.py fetch` failed four times on this network: the server closed the connection at 17 to 41 %, and each partial file was rejected by the SHA512 check (`runs/real-vm/port-20261108/fetch-amd64*.log`). The image was then downloaded with a resuming client, checked against `SHA512SUMS`, and `vm.py fetch` verified the copy in the VM home. `vm.py fetch` now resumes by itself (see below). |
+| Golden image | 4 min 6 s | arm64 under native TCG: 1 min 55 s |
+| Fault images | 157, 155 and 149 s | sshd-config-typo, fstab-missing-disk, grub-password |
+
+`tools/vm/prove.py` on the three `/try` faults (run `amd64-20261108T045906Z`, 8 minutes in all):
+
+| Fault | Boot to symptom | Keyboard session | `finished` to capture | Checks | Outcome |
+|---|---|---|---|---|---|
+| sshd-config-typo | 54 s | 24 s, 4 inputs | 41 s | 18 of 18 | CAPTURED $9.00 |
+| fstab-missing-disk | 47 s | 149 s, 3 inputs (includes a reboot) | 51 s | 18 of 18 | CAPTURED $19.00 |
+| grub-password | 6 s | 27 s, 2 inputs (one is a reset) | void at once | 16 of 16 | VOIDED, nothing captured |
+
+The columns mean the same as in the arm64 table above. Each fault took 78 to 271 seconds from
+overlay to cleanup. The same three faults on arm64 guests under native TCG took 80 to 133 seconds
+in run 20261107T180339Z and 82 to 165 seconds in the re-run `arm64-20261108T050736Z` below.
+
+The screenshots in that run show what the agent needs on the VGA screen: the firmware and GRUB's
+`Enter username:` prompt, the Linux console with `[FAILED] Failed to start ssh.service` above the
+login prompt, and the emergency-mode root password prompt (drawn within the fault's 10 s settle
+time). Text typed with the PS/2 keyboard reached GRUB, the login prompt, the emergency shell and
+the root shell. The serial markers (`login:`, `Reached target emergency.target`,
+`Enter username`, the journal lines the fix scripts wait for) all came through `ttyS0`. The fault
+scripts and fix scripts needed no change for amd64; only the serial port's name in the golden
+seed differs.
+
+The slow test suite (`uv run pytest -m slow tests/console/test_real_guest.py`) passed on the
+amd64 images in one run of all three tests (507 s: the healthy-guest test 350 s, the
+masked-sshd fix 131 s, the GRUB reset 24 s; `runs/real-vm/slow-pytest-amd64-20261108T064205Z.log`).
+The healthy-guest test takes a screenshot, types a command into the root shell whose output
+reaches `ttyS0`, power-cycles back to the login prompt and powers off cleanly with ACPI.
+
+Before that, during the port, the suite ran in pieces, and its logins failed twice. The test typed
+the password one second after the user name, before the emulated guest showed its prompt (PAM
+logged an authentication failure). Then, in one slow boot (2 min 14 s to the login prompt,
+against 44 s in other boots), the masked-sshd test's login timed out, apparently because the user
+name typed 3 s after the serial prompt never reached the screen's login; the healthy-guest test
+passed in that run. The test's login now waits 4 seconds for the password prompt, as the fix
+scripts do, checks the PAM session line on the serial log, and retries. The masked-sshd test then
+passed alone, and the run above, made with the committed test code, passed all three. Of the runs
+during the port, logs of the last two are in `runs/real-vm/port-20261108/` (`slow-amd64-2.log`,
+`slow-amd64-3.log`; they do not record which version of the login they ran); the earlier ones,
+among them the first GRUB reset pass, were not saved. The fix scripts in `prove.py` already
+waited and were not affected.
+
+The same code was run again on the existing arm64 images with the new `keyhold-qemu-runner:3`:
+the same three faults passed `prove.py` (run `arm64-20261108T050736Z`; 110, 165 and 82 s), and
+the slow test suite passed (3 tests, 3 min 18 s; `runs/real-vm/port-20261108/slow-arm64.log`).
+After the changes below it passed again (3 tests, 2 min 58 s;
+`runs/real-vm/slow-pytest-arm64-20261108T063906Z.log`). The arm64 seed is byte-for-byte the same
+as before, so arm64 images built earlier stay valid.
+
+### KVM probe, TCG fallback and resumed downloads
+
+Checked on the same Mac (no KVM), with the logs in `runs/real-vm/`:
+
+- **KVM probe** (`kvm-probe-and-fallback.log`). `kvm_available()` now has the runner's QEMU start
+  `-accel kvm` on an empty machine and quit, because `test -r`/`-w /dev/kvm` always pass for the
+  container's root with `DAC_OVERRIDE`. In both runner images the probe's command fails without
+  `/dev/kvm` ("failed to initialize kvm"), and the same command with `-accel tcg` succeeds, so
+  QEMU's own exit status is what it reports. On this host `kvm_available()` answers no for both.
+  The probe answering yes was not seen: that needs a host with KVM.
+- **TCG fallback** (same log). With the probe forced to yes, a healthy arm64 guest still started,
+  under TCG, both when docker refused `--device /dev/kvm` and when QEMU got `-accel kvm` without
+  the device and exited; `kvm_fallback` held the error and the runner then answered no.
+- **`vm.py fetch` resumes** (`fetch-resume-amd64.log`). With a `.part` holding the first
+  300,000,000 bytes of the verified amd64 image, `fetch_base_image` asked `cloud.debian.org` for
+  the rest, got HTTP 206 for bytes 300000000 to 341180415, and the result matched the pinned
+  SHA512. A connection cut in the middle was tested only with a fake server.
+
+### The firmware has no UEFI shell
+
+The GRUB-password fault is honest only if the firmware offers no way around the password. With a
+UEFI shell, an agent could edit the GRUB files on the EFI partition. Checked for Debian 13's OVMF
+(package `ovmf` 2025.02-8+deb13u1):
+
+- **Contents.** After decompressing every LZMA section of the firmware images, the plain build
+  (`OVMF_CODE_4M.fd`) holds the UEFI Shell application (file GUID `7C04A583-...`) and its
+  strings; the Secure Boot builds (`OVMF_CODE_4M.secboot.fd` and `.secboot.strictnx.fd`) hold no
+  shell application, only the boot manager's reference to its GUID. AAVMF shows the same split.
+- **Behaviour.** Booted with no disk, the plain build starts "EFI Internal Shell" and stops at
+  `Shell>`. The Secure Boot build prints "No bootable option or device was found" and opens the
+  setup menu, whose Boot Manager lists no shell.
+- **SMM.** The Secure Boot build needs SMM: on `q35` without `smm=on` it printed nothing on the
+  screen or the serial port in 75 seconds. Hence `q35,smm=on` and the secure flash in `qemu_argv`.
+
+What the firmware still offers: after a reset, Escape opens its setup menu from the console
+(seen on an amd64 guest held at the GRUB prompt; AAVMF's Secure Boot build carries the same
+setup application). Its Boot Manager lists the disk and network boot entries (PXE and HTTP; not
+tried, and with `restrict=on` the guest cannot open connections), and its Boot Maintenance
+Manager has "Boot From File" and a file explorer for the EFI partition.
+That partition holds shim, GRUB, MokManager and the shim fallback (`EFI/BOOT` and `EFI/debian`),
+and no shell. Whether these setup screens give any way around the GRUB password was not
+evaluated.
+
+### Still to verify on the x86-64 KVM host
+
+- KVM itself: `/dev/kvm` passed into the container, QEMU as the container's root with only
+  `DAC_OVERRIDE`, `-accel kvm -cpu host` on `q35,smm=on` under nested virtualization, the
+  `kvm_available()` probe answering yes there, and no TCG fallback in `prove.py`'s timeline.
+- The amd64 runner image built natively, and `vm.py fetch` over that host's network.
+- Timing under KVM: the fix scripts wait for serial markers, but a few steps use fixed pauses and
+  the fstab fault a 10 s screen settle time; they were measured only under emulation, where the
+  guest is slower.
+- The other catalog faults on amd64 through `prove.py` (sshd-masked was fixed from the keyboard
+  only by the slow test; sshd-port-page-down and network-static-wrong were not planted), and the
+  web app's VM world (`/try`) with amd64 guests.
+
+## On an x86-64 host with KVM (run 20261108T062651Z)
+
+A cloud VM with nested virtualization (2 vCPU, 8 GB, Debian 13) built the amd64 images and ran
+`tools/vm/prove.py` over the whole catalog. Building the runner image, fetching and verifying the
+base image, the golden boot and planting all six faults took 173 s together (about 15 min under
+emulation on the Mac). Every guest ran under KVM; the scripted agent and FakePayPal stand in as
+in the other runs.
+
+| Fault | Checks | End | Symptom on serial | Whole run | Accel |
+|---|---|---|---|---|---|
+| sshd-config-typo | pass (0 failed checks) | CAPTURED | 12.8 s | 88 s | kvm |
+| sshd-masked | pass (0 failed checks) | CAPTURED | 11.4 s | 78 s | kvm |
+| sshd-port-page-down | pass (0 failed checks) | CAPTURED | 12.4 s | 82 s | kvm |
+| network-static-wrong | pass (0 failed checks) | CAPTURED | 12.4 s | 106 s | kvm |
+| fstab-missing-disk | pass (0 failed checks) | CAPTURED | 23.6 s | 111 s | kvm |
+| grub-password | pass (0 failed checks) | VOIDED | 4.2 s | 77 s | kvm |
+
+A later run of `sshd-config-typo` with the KVM probe that starts QEMU (rather than only checking
+that `/dev/kvm` exists) also chose KVM and passed in 86 s. The same host serves the hosted `/try`
+with two test servers at once.
 
 ## Not covered on real guests
 
@@ -173,7 +327,8 @@ same prompt.
 - The warranty. `prove.py` turns it off (`RescueConfig(warranty=False)`). The live sandbox rescues
   ran the judge-mode warranty on a test VM (24 checks each, all passed; see [evidence/](evidence/README.md)).
   A failing warranty, which refunds, has not run on a real guest.
-- KVM speed (no KVM on this machine, see above).
+- KVM speed (no KVM on this machine, see above), and x86-64 guests under KVM (see "Still to
+  verify on the x86-64 KVM host").
 
 ## Files
 
@@ -187,6 +342,11 @@ Under `runs/real-vm/` (git-ignored):
 - `<UTC time>/<fault>/serial.log`, `ledger.sqlite3`, `fakepaypal.json`.
 - `runner-build*.log`, `fetch-fresh.log`, `seed.log`, `golden-and-faults-build.log`: build
   timings.
+- `slow-pytest*.log`: the slow test suite (`slow-pytest.log` is the first arm64 run).
+- `port-20261108/`: logs kept from the amd64 port (the failed `vm.py fetch` runs and three slow
+  suite runs).
+- `kvm-probe-and-fallback.log`, `fetch-resume-amd64.log`: the checks under "KVM probe, TCG
+  fallback and resumed downloads".
 
 ## Reproduce
 

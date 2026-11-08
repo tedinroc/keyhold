@@ -179,7 +179,7 @@ Each row names something you can check in the repository or on `/try`.
 
 ## What the browser cannot trigger, and where it is tested
 
-The test suite runs without any account or network (`uv run pytest -q`: 1001 tests, 998 pass, 3
+The test suite runs without any account or network (`uv run pytest -q`: 1058 tests, 1055 pass, 3
 are skipped because they boot real guests).
 
 | Case | Test |

@@ -1,14 +1,18 @@
 # Test guests
 
 Keyhold's agent works on a real server console: a screen and a keyboard. For development and the
-demo, that server is a local virtual machine: Debian 13 (arm64, the official "genericcloud" image)
-under QEMU, inside a Linux container started with docker. Nothing here touches a remote server.
+demo, that server is a local virtual machine: Debian 13 (the official "genericcloud" image) under
+QEMU, inside a Linux container started with docker. Nothing here touches a remote server.
+
+The guest has the architecture of the runner image, which `vm.py runner` builds for the docker
+host: 64-bit Arm guests on an arm64 host, x86-64 (amd64) guests on an x86-64 host. See
+"Architectures" below.
 
 ## Pieces
 
 | File | What it is |
 |---|---|
-| `Dockerfile` | Runner image `keyhold-qemu-runner:2`: `qemu-system-aarch64`, UEFI firmware, `qemu-img`, `genisoimage`, `socat`. |
+| `Dockerfile` | Runner image `keyhold-qemu-runner:3`: QEMU and UEFI firmware for the image's architecture (`qemu-system-aarch64` and AAVMF, or `qemu-system-x86_64` and OVMF), `qemu-img`, `genisoimage`, `socat`. |
 | `vm-entry.sh` | Container entry point: port relays (see "Networking"), then QEMU. |
 | `vm.py` | Command line for everything below. Logic lives in `keyhold/console/` and `keyhold/faults/`. |
 | `prove.py` | Runs every fault on a real guest through the PayPal lock (FakePayPal) and checks the money outcome. See "Proof on real guests". |
@@ -26,9 +30,10 @@ uv run python tools/vm/vm.py status
 ```
 
 `runner` and `fetch` need the internet. The rest works offline. Measured on an Apple Silicon Mac
-(docker under OrbStack, TCG emulation, no KVM): a clean `runner --no-cache` build 37 s, `fetch`
-2 min 15 s, the golden boot 1 min 55 s, `plant all` 4 min 10 s (29 to 52 s per fault), and a run
-reaches its symptom 6 to 43 seconds after the container starts. Details in `docs/REAL_VM.md`.
+(docker under OrbStack, TCG emulation, no KVM), arm64 guests: a clean `runner --no-cache` build
+37 s, `fetch` 2 min 15 s, the golden boot 1 min 55 s, `plant all` 4 min 10 s (29 to 52 s per
+fault), and a run reaches its symptom 6 to 43 seconds after the container starts. Details, and
+the amd64 times under emulation, in `docs/REAL_VM.md`.
 
 `runner` pulls images with a temporary docker config that has no stored credentials, because a
 desktop credential helper can block on a keychain prompt. Pass `--use-my-docker-config` to use your
@@ -39,7 +44,7 @@ own.
 Every image is a qcow2 overlay of the one above it, with a relative backing path:
 
 ```
-var/vm/base/debian-13-genericcloud-arm64-<build>.qcow2   official image, pinned by build and SHA512
+var/vm/base/debian-13-genericcloud-<arch>-<build>.qcow2  official image, pinned by build and SHA512
   var/vm/golden/golden.qcow2       demo page, probe user and key, root console password
     var/vm/faults/<fault>.qcow2    the fault planted by a prepare boot
       var/vm/runs/<run>/disk.qcow2 what one rescue boots; deleted afterwards
@@ -48,7 +53,9 @@ var/vm/base/debian-13-genericcloud-arm64-<build>.qcow2   official image, pinned 
 A run overlay takes milliseconds to create, so every run starts from the same broken server.
 
 **Base.** `fetch` checks the pinned SHA512 against the build's published `SHA512SUMS` first, then
-downloads to a `.part` file and keeps it only if its SHA512 matches.
+downloads to a `.part` file and keeps it only if its SHA512 matches. A dropped connection is
+resumed with an HTTP range request from the end of the `.part` file. After six failed connections
+in a row that add nothing, `fetch` stops and keeps the `.part`; running it again resumes.
 
 **Golden.** A NoCloud seed (`cidata` ISO) makes cloud-init:
 - serve a small page on port 80 (systemd socket `demo-page.socket`, one shell process per request,
@@ -68,16 +75,49 @@ catalog is `keyhold/faults/__init__.py`.
 
 `keyhold.console.qemu.QemuVM` starts one container per guest (`keyhold-run-<id>`):
 
-- machine `virt`, UEFI firmware (the Secure Boot build, which has no UEFI shell, so the
-  firmware offers no way around a GRUB password; Secure Boot itself stays off), `ramfb` framebuffer (800x600; firmware, GRUB and the Linux
-  console all draw on it), a USB keyboard for the firmware and GRUB, and a virtio keyboard for
-  Linux (the Debian cloud kernel has no USB support);
+- the machine, screen and keyboard of the guest's architecture (see "Architectures"), with UEFI
+  firmware: the Secure Boot build, which has no UEFI shell, so the firmware offers no way around a
+  GRUB password (Secure Boot itself stays off, because the variable store has no keys);
 - two QMP sockets: one lent to the console (`QemuConsole`: screendump, send-key, system_reset), one
   kept for control (status, clean shutdown with the ACPI power button);
 - the serial port written to `runs/<id>/serial.log` (kernel messages and the journal);
-- KVM when the docker host has `/dev/kvm` and is aarch64, otherwise TCG.
+- KVM when the runner image is native to the docker host and QEMU can start KVM in a container
+  given `/dev/kvm` (the probe creates a VM on an empty machine and quits); otherwise TCG. If a
+  guest still does not start with KVM, it is started again under TCG, and so are later guests.
 
 All published ports bind to the host loopback.
+
+## Architectures
+
+| | arm64 runner | amd64 runner |
+|---|---|---|
+| QEMU | `qemu-system-aarch64`, machine `virt` | `qemu-system-x86_64`, machine `q35` with SMM (the Secure Boot OVMF build needs it) |
+| Firmware | `AAVMF_CODE.secboot.fd`, `AAVMF_VARS.fd` | `OVMF_CODE_4M.secboot.fd`, `OVMF_VARS_4M.fd` |
+| Screen | `ramfb`, 800x600 | standard VGA, 800x600 |
+| Keyboard | USB keyboard (firmware, GRUB) and virtio keyboard (Linux) | the PC's PS/2 keyboard (firmware, GRUB and Linux) |
+| Serial port in the guest | `ttyAMA0` | `ttyS0` |
+| Base image | `debian-13-genericcloud-arm64-<build>.qcow2` | `debian-13-genericcloud-amd64-<build>.qcow2` (same build) |
+| KVM | on an arm64 host with `/dev/kvm` | on an x86-64 host with `/dev/kvm` (for example a cloud VM with nested virtualization) |
+
+Everything else is the same: networking, the relays, both QMP sockets, the disk chain, the
+cloud-init seed (only the serial port's name differs), the fault catalog and the fix scripts.
+Under KVM the guest gets 2 vCPUs and `-cpu host`; under TCG 4 vCPUs and `-cpu max`.
+
+One VM home holds the images of one architecture. `golden/golden.json` records it, and planting
+a fault or starting a run refuses a runner of the other architecture. To try the other
+architecture on one machine (slowly, under emulation), give it its own runner image and VM home:
+
+```
+export KEYHOLD_RUNNER_IMAGE=keyhold-qemu-runner:3-amd64 KEYHOLD_VM_HOME=var/vm-amd64
+uv run python tools/vm/vm.py runner --platform linux/amd64
+uv run python tools/vm/vm.py fetch
+uv run python tools/vm/vm.py golden
+uv run python tools/vm/vm.py plant sshd-config-typo
+uv run python tools/vm/prove.py sshd-config-typo
+```
+
+An emulated runner never uses the host's KVM, so its guests run under TCG inside an emulated
+QEMU: slow, but the same guest as on a native host.
 
 ## Networking
 

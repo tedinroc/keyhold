@@ -9,8 +9,9 @@ from the deployment, the uploaded film and the public repository. Do not estimat
 | [HOSTED URL], [VIDEO URL], [REPO URL] | the deployment, the uploaded film, the public repository |
 
 The live-run figures come from [docs/evidence/](evidence/README.md). Test counts below are from
-`uv run pytest -q` on 2026-11-08: 1001 collected, 998 passed, 3 skipped
-(they boot real guests). Re-run before submitting and update them if they changed.
+`uv run pytest -q` on 2026-11-08: 1058 collected, 1055 passed, 3 skipped
+(they boot real guests). `tests/test_doc_counts.py` fails while these counts, or the ones in the
+README and the judge guide, differ from the suite's.
 
 ---
 
@@ -113,7 +114,7 @@ keystroke firewall refuses destructive commands before they reach the console.
 
 ## Accomplishments that we're proud of
 
-- 1001 tests: 998 pass, and 3 boot real guests on demand. None reach the network. A stateful
+- 1058 tests: 1055 pass, and 3 boot real guests on demand. None reach the network. A stateful
   property test drives rescues through random PayPal errors, lost answers, crashes, expiry and
   out-of-order webhooks, checking every money invariant after every step. Chaos tests SIGKILL a
   process around the capture and find exactly one capture afterwards.

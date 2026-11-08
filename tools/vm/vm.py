@@ -1,7 +1,7 @@
 """Build and run Keyhold's local test guests.
 
     uv run python tools/vm/vm.py runner              build the QEMU runner image (docker)
-    uv run python tools/vm/vm.py fetch               download the Debian 13 arm64 image, verify SHA512
+    uv run python tools/vm/vm.py fetch               download the Debian 13 image, verify SHA512
     uv run python tools/vm/vm.py seed                build the cloud-init seed only (for inspection)
     uv run python tools/vm/vm.py golden              boot once with the seed -> golden.qcow2
     uv run python tools/vm/vm.py plant all           plant every fault -> faults/<id>.qcow2
@@ -13,21 +13,36 @@
     uv run python tools/vm/vm.py clean               remove leftover containers and run overlays
 
 Everything is kept under var/vm (or $KEYHOLD_VM_HOME). Secrets there are never printed.
+
+Guests have the runner image's architecture: arm64 on an arm64 docker host, amd64 (x86-64) on an
+x86-64 one. One VM home holds the images of one architecture. To try the other architecture under
+emulation, build its runner under another name and keep its images in their own VM home:
+
+    export KEYHOLD_RUNNER_IMAGE=keyhold-qemu-runner:3-amd64 KEYHOLD_VM_HOME=var/vm-amd64
+    uv run python tools/vm/vm.py runner --platform linux/amd64
 """
 
 from __future__ import annotations
 
 import argparse
+import platform
 import sys
 import time
 from pathlib import Path
 
 from keyhold.console.base import ConsoleError
-from keyhold.console.docker import DockerRunner, anonymous_docker_env, remove_tree
+from keyhold.console.docker import (
+    GUEST_ARCHES,
+    DockerError,
+    DockerRunner,
+    anonymous_docker_env,
+    normalize_arch,
+    remove_tree,
+)
 from keyhold.console.image import (
-    DEBIAN_13_ARM64,
     GoldenConfig,
     VMHome,
+    base_image_for,
     build_golden,
     build_iso,
     ensure_console_password,
@@ -51,6 +66,21 @@ def _runner(home: VMHome) -> DockerRunner:
     return DockerRunner(home.root)
 
 
+def _guest_arch(runner: DockerRunner, override: str | None = None) -> str:
+    """The guest architecture: ``override``, else the runner image's, else the docker host's,
+    else this machine's."""
+    if override:
+        return override
+    try:
+        return runner.arch()
+    except DockerError:
+        pass
+    try:
+        return runner.daemon_arch()
+    except DockerError:
+        return normalize_arch(platform.machine())
+
+
 def cmd_runner(args: argparse.Namespace, home: VMHome) -> int:
     runner = _runner(home)
     tmp = None
@@ -58,14 +88,18 @@ def cmd_runner(args: argparse.Namespace, home: VMHome) -> int:
         env, tmp = anonymous_docker_env()
         runner.env = env
     try:
-        platform = runner.native_platform()
-        print(f"building {runner.image} for {platform} (this pulls debian:trixie-slim and QEMU packages)")
-        runner.build_image(HERE, platform=platform, no_cache=args.no_cache)
+        target = args.platform or runner.native_platform()
+        print(f"building {runner.image} for {target} (this pulls debian:trixie-slim and QEMU packages)")
+        runner.build_image(HERE, platform=target, no_cache=args.no_cache)
     finally:
         if tmp is not None:
             remove_tree(tmp)
-    print(f"built {runner.image}")
+    print(f"built {runner.image} ({runner.arch()} guests)")
     return 0
+
+
+def _notice(message: str) -> None:
+    print(f"  {message}", flush=True)
 
 
 def cmd_fetch(args: argparse.Namespace, home: VMHome) -> int:
@@ -78,8 +112,9 @@ def cmd_fetch(args: argparse.Namespace, home: VMHome) -> int:
             share = f"{done * 100 // total}%" if total else f"{done >> 20} MB"
             print(f"  downloaded {share}", flush=True)
 
-    path = fetch_base_image(home, DEBIAN_13_ARM64, progress=progress)
-    print(f"verified {path} (SHA512 {DEBIAN_13_ARM64.sha512[:16]}...)")
+    image = base_image_for(_guest_arch(_runner(home), args.arch))
+    path = fetch_base_image(home, image, progress=progress, notice=_notice)
+    print(f"verified {path} (SHA512 {image.sha512[:16]}...)")
     return 0
 
 
@@ -91,6 +126,7 @@ def cmd_seed(args: argparse.Namespace, home: VMHome) -> int:
         probe_public_key=ensure_probe_key(home),
         console_password=ensure_console_password(home),
         page_token=secrets.token_hex(8),
+        arch=_guest_arch(runner),
     )
     out = home.golden_dir / "seed"
     files = write_seed_dir(out, cfg)
@@ -102,11 +138,13 @@ def cmd_seed(args: argparse.Namespace, home: VMHome) -> int:
 
 def cmd_golden(args: argparse.Namespace, home: VMHome) -> int:
     runner = _runner(home)
-    if not verify_base_image(home.base_image()):
-        fetch_base_image(home)
-    print("booting the base image with the cloud-init seed (several minutes under emulation)...")
-    info = build_golden(home, runner, force=args.force, timeout=args.timeout)
-    print(f"golden image {home.golden_disk}")
+    arch = runner.arch()
+    image = base_image_for(arch)
+    if not verify_base_image(home.base_image(image), image):
+        fetch_base_image(home, image, notice=_notice)
+    print(f"booting the {arch} base image with the cloud-init seed (several minutes under emulation)...")
+    info = build_golden(home, runner, image=image, arch=arch, force=args.force, timeout=args.timeout)
+    print(f"golden image {home.golden_disk} ({info.arch})")
     print(f"page sha256 {info.page_sha256}; probe user {info.probe_user}; console user {info.console_user}")
     return 0
 
@@ -139,6 +177,8 @@ def cmd_up(args: argparse.Namespace, home: VMHome) -> int:
     run_id, disk = new_run(home, runner, fault_id, args.run_id)
     vm = QemuVM(runner, name=f"keyhold-run-{run_id}", run_dir=home.run_dir(run_id), disk=disk)
     endpoints = vm.start()
+    if vm.kvm_fallback:
+        print(f"KVM did not start the guest, so it runs under TCG:\n{vm.kvm_fallback}", file=sys.stderr)
     print(f"run {run_id} started ({vm.accel}); container {vm.name}")
     marker = get_fault(fault_id).ready_marker if fault_id else r"login:"
     started = time.monotonic()
@@ -193,10 +233,19 @@ def cmd_status(args: argparse.Namespace, home: VMHome) -> int:
     runner = _runner(home)
     print(f"VM home      {home.root}")
     print(f"docker       {'ok' if runner.available() else 'not available'}")
-    print(f"runner image {'present' if runner.image_present() else 'missing (vm.py runner)'}")
-    base = home.base_image()
-    print(f"base image   {'verified' if verify_base_image(base) else 'missing or unverified (vm.py fetch)'}")
-    print(f"golden       {'built' if home.golden_disk.is_file() else 'not built (vm.py golden)'}")
+    present = runner.image_present()
+    print(f"runner image {runner.image}: {f'present, {runner.arch()} guests' if present else 'missing (vm.py runner)'}")
+    image = base_image_for(_guest_arch(runner))
+    verified = verify_base_image(home.base_image(image), image)
+    print(f"base image   {image.filename}: {'verified' if verified else 'missing or unverified (vm.py fetch)'}")
+    if home.golden_disk.is_file():
+        try:
+            golden = f"built ({load_golden_info(home).arch})"
+        except ConsoleError:
+            golden = "built (golden.json missing)"
+    else:
+        golden = "not built (vm.py golden)"
+    print(f"golden       {golden}")
     for fault_id in FAULTS:
         print(f"  fault {fault_id:22} {'built' if home.fault_disk(fault_id).is_file() else '-'}")
     runs = sorted(p.name for p in home.runs_dir.glob("*") if p.is_dir()) if home.runs_dir.is_dir() else []
@@ -233,9 +282,16 @@ def main(argv: list[str] | None = None) -> int:
         help="use your docker credential helper instead of anonymous pulls",
     )
     p.add_argument("--no-cache", action="store_true", help="rebuild every layer instead of reusing the build cache")
+    p.add_argument(
+        "--platform",
+        choices=[f"linux/{a}" for a in GUEST_ARCHES],
+        help="build for this platform instead of the docker host's (its guests then run under emulation)",
+    )
     p.set_defaults(func=cmd_runner)
 
-    sub.add_parser("fetch", help="download and verify the base image").set_defaults(func=cmd_fetch)
+    p = sub.add_parser("fetch", help="download and verify the base image")
+    p.add_argument("--arch", choices=GUEST_ARCHES, help="guest architecture (default: the runner image's)")
+    p.set_defaults(func=cmd_fetch)
     sub.add_parser("seed", help="build the cloud-init seed without booting").set_defaults(func=cmd_seed)
 
     p = sub.add_parser("golden", help="build the golden image")

@@ -157,7 +157,7 @@ system_reset). `keyhold/console/fake.py` is a scripted console for tests and the
 
 ## Invariants and how they are tested
 
-`uv run pytest -q` collects 1001 tests: 998 pass and 3 are skipped by default (they boot real
+`uv run pytest -q` collects 1058 tests: 1055 pass and 3 are skipped by default (they boot real
 guests; see "Run it locally"). The tests make no network calls: a fixture refuses any socket
 connection that is not to the loopback address and removes `PAYPAL_*`, `ANTHROPIC_*` and
 `KEYHOLD_*` variables from the environment.

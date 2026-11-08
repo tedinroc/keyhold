@@ -7,6 +7,11 @@ qcow2 chain opens on the host and in the container.
 
 Ports a VM publishes are bound to the host loopback only.
 
+The runner image's architecture decides the guest's: an arm64 runner runs 64-bit Arm guests, an
+amd64 runner runs x86-64 guests (``DockerRunner.arch``). ``vm.py runner`` builds the image for the
+docker host's own architecture; ``KEYHOLD_RUNNER_IMAGE`` names another image, for example one
+built for the other architecture to test its guests under emulation.
+
 A long-running guest container sees the VM home read-only, except the directories its QEMU
 writes (its run directory and the folder of its disk). The probe key folder (``keys/``) and the
 console password file are hidden from it, so a QEMU escape or a stray QMP client finds neither.
@@ -29,15 +34,23 @@ from keyhold.console.base import ConsoleError
 
 __all__ = [
     "RUNNER_IMAGE",
+    "GUEST_ARCHES",
     "CONTAINER_VM_HOME",
     "LOOPBACK",
     "VM_LABEL",
     "DockerError",
     "DockerRunner",
     "anonymous_docker_env",
+    "default_runner_image",
+    "kvm_probe_script",
+    "normalize_arch",
 ]
 
-RUNNER_IMAGE = "keyhold-qemu-runner:2"  # bump when tools/vm/Dockerfile changes
+RUNNER_IMAGE = "keyhold-qemu-runner:3"  # bump when tools/vm/Dockerfile changes
+GUEST_ARCHES = ("arm64", "amd64")  # Debian's names for the architectures Keyhold has guests for
+# The kernel's name for each architecture (``uname -m``).
+MACHINE = {"arm64": "aarch64", "amd64": "x86_64"}
+_ARCH_ALIASES = {"arm64": "arm64", "aarch64": "arm64", "amd64": "amd64", "x86_64": "amd64", "x86-64": "amd64"}
 CONTAINER_VM_HOME = "/vm"
 LOOPBACK = "127.0.0.1"
 VM_LABEL = "keyhold.vm"
@@ -48,6 +61,35 @@ RunFn = Callable[..., subprocess.CompletedProcess]
 SECRET_PATHS = ("keys", "golden/console-password")
 GUEST_PIDS_LIMIT = 512
 GUEST_MEMORY_OVERHEAD_MB = 1024  # QEMU itself, the TCG translation cache, socat
+
+
+def normalize_arch(name: str) -> str:
+    """``arm64`` or ``amd64`` for any common spelling (aarch64, x86_64, ...). Raises
+    ``ValueError`` for an architecture Keyhold has no guest for."""
+    arch = _ARCH_ALIASES.get(str(name).strip().lower())
+    if arch is None:
+        raise ValueError(f"no Keyhold guest for architecture {name!r} (only {', '.join(GUEST_ARCHES)})")
+    return arch
+
+
+def kvm_probe_script(arch: str) -> str:
+    """The shell command of the KVM probe (``DockerRunner.kvm_available``) for a runner of
+    ``arch``. It checks that the container really runs that architecture, then starts the
+    runner's QEMU with ``-accel kvm`` on an empty machine (``-machine none``: no CPU, devices or
+    firmware) and quits it through the monitor. Starting KVM opens /dev/kvm and creates a VM, so
+    the command exits 0 only if QEMU can run a KVM guest here. ``timeout`` bounds a QEMU that
+    hangs instead."""
+    machine = MACHINE[arch]
+    return (
+        f'test -c /dev/kvm && test "$(uname -m)" = {machine} && '
+        f"echo quit | timeout 30 qemu-system-{machine} -nodefaults -display none -machine none "
+        "-accel kvm -monitor stdio >/dev/null"
+    )
+
+
+def default_runner_image() -> str:
+    """``$KEYHOLD_RUNNER_IMAGE`` if set, else ``RUNNER_IMAGE``."""
+    return os.environ.get("KEYHOLD_RUNNER_IMAGE", "").strip() or RUNNER_IMAGE
 
 
 class DockerError(ConsoleError):
@@ -63,11 +105,13 @@ class DockerRunner:
     """Thin wrapper over the ``docker`` CLI. ``run`` is injectable so tests never start docker."""
 
     vm_home: Path
-    image: str = RUNNER_IMAGE
+    image: str = field(default_factory=default_runner_image)
     docker: str = "docker"
     run: RunFn = subprocess.run
     env: Mapping[str, str] | None = None
     _kvm: bool | None = field(default=None, init=False, repr=False)
+    _arch: str | None = field(default=None, init=False, repr=False)
+    _daemon_arch: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.vm_home = Path(self.vm_home).resolve()
@@ -136,25 +180,78 @@ class DockerRunner:
         except DockerError:
             return False
 
-    def kvm_available(self) -> bool:
-        """True when the docker host has /dev/kvm and the runner is aarch64 (KVM cannot run a
-        guest of another architecture). Cached after the first call."""
-        if self._kvm is None:
-            probe = [
-                "run",
-                "--rm",
-                "--device",
-                "/dev/kvm",
-                self.image,
-                "sh",
-                "-c",
-                'test -c /dev/kvm && test "$(uname -m)" = aarch64',
-            ]
+    def arch(self) -> str:
+        """The runner image's architecture, ``arm64`` or ``amd64``. Guests have the same
+        architecture as the runner. Cached after the first call."""
+        if self._arch is None:
+            inspect = ["image", "inspect", "--format", "{{.Architecture}}", self.image]
+            proc = self._docker(inspect, timeout=20, check=False)
+            if proc.returncode != 0:
+                raise DockerError(
+                    f"runner image {self.image} is missing; build it with: uv run python tools/vm/vm.py runner",
+                    proc.stderr or "",
+                )
             try:
-                self._kvm = self._docker(probe, timeout=60, check=False).returncode == 0
+                self._arch = normalize_arch(proc.stdout.strip())
+            except ValueError as exc:
+                raise DockerError(f"runner image {self.image}: {exc}") from None
+        return self._arch
+
+    def daemon_arch(self) -> str:
+        """The docker host's own architecture, ``arm64`` or ``amd64``. Cached."""
+        if self._daemon_arch is None:
+            arch = self._docker(["info", "--format", "{{.Architecture}}"], timeout=20).stdout.strip()
+            try:
+                self._daemon_arch = normalize_arch(arch)
+            except ValueError as exc:
+                raise DockerError(str(exc)) from None
+        return self._daemon_arch
+
+    def kvm_available(self) -> bool:
+        """True when KVM can run this runner's guests: the runner image runs natively on the
+        docker host (KVM cannot run a guest of another architecture, and an emulated runner
+        cannot use the host's KVM) and QEMU can use /dev/kvm in a container with the same
+        privileges a KVM guest container gets. Cached after the first call.
+
+        The probe (``kvm_probe_script``) starts the runner's QEMU with KVM on an empty machine
+        and quits it at once. QEMU opens /dev/kvm and creates a VM, so a /dev/kvm that exists but
+        cannot run a VM (for example while another hypervisor holds the CPU's virtualization)
+        answers no. Checking the file's permissions would prove nothing: the container's root
+        has DAC_OVERRIDE. The empty machine has no vCPU, so a guest can still fail to start with
+        KVM; ``QemuVM.start`` then starts it under TCG and calls ``disable_kvm``."""
+        if self._kvm is None:
+            try:
+                arch = self.arch()
+                if arch != self.daemon_arch():
+                    self._kvm = False
+                    return False
+                probe = [
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--cap-drop",
+                    "ALL",
+                    "--cap-add",
+                    "DAC_OVERRIDE",
+                    "--device",
+                    "/dev/kvm",
+                    self.image,
+                    "sh",
+                    "-c",
+                    kvm_probe_script(arch),
+                ]
+                self._kvm = self._docker(probe, timeout=90, check=False).returncode == 0
             except DockerError:
                 self._kvm = False
         return self._kvm
+
+    def disable_kvm(self) -> None:
+        """Run this runner's later guests under TCG: a guest did not start with KVM although the
+        probe passed."""
+        self._kvm = False
 
     # ------------------------------------------------------------------ one-shot tools
 
@@ -265,13 +362,11 @@ class DockerRunner:
             args += ["--no-cache", "--pull"]
         args += [str(context_dir)]
         self._docker(args, timeout=timeout)
+        self._arch = self._kvm = None  # the new image may be for another architecture
 
     def native_platform(self) -> str:
         """``linux/arm64`` or ``linux/amd64``, from the docker daemon's architecture."""
-        arch = self._docker(["info", "--format", "{{.Architecture}}"], timeout=20).stdout.strip()
-        return {"aarch64": "linux/arm64", "arm64": "linux/arm64", "x86_64": "linux/amd64", "amd64": "linux/amd64"}.get(
-            arch, f"linux/{arch}"
-        )
+        return f"linux/{self.daemon_arch()}"
 
 
 _ANON_HELPER = """#!/bin/sh
