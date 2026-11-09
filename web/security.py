@@ -166,10 +166,19 @@ def check_passcode(given: str | None, expected: str) -> bool:
 # --------------------------------------------------------------------------------------------
 
 
-def client_ip(request: Request, *, trust_proxy: bool = False) -> str:
-    """The caller's address. With ``trust_proxy`` (Keyhold behind one HTTPS proxy) it is the last
+def client_ip(request: Request, *, trust_proxy: bool = False, edge_key: str = "") -> str:
+    """The caller's address. With ``edge_key`` set, a request that carries that key in
+    ``X-Keyhold-Edge-Key`` came through Keyhold's own edge (a Cloudflare Worker in front of the
+    proxy), and ``X-Keyhold-Client-IP`` is the address the edge saw. Without the key those headers
+    are ignored. With ``trust_proxy`` (Keyhold behind one HTTPS proxy) it is the last
     X-Forwarded-For entry, the one the proxy appended for the peer it saw. The entries before it
     come from the client and can say anything, so they are never used. Otherwise the socket peer."""
+    if edge_key:
+        sent = request.headers.get("x-keyhold-edge-key", "")
+        if sent and hmac.compare_digest(sent.encode(), edge_key.encode()):
+            edge_client = request.headers.get("x-keyhold-client-ip", "").strip()
+            if edge_client:
+                return edge_client[:64]
     if trust_proxy:
         forwarded = [e.strip() for e in request.headers.get("x-forwarded-for", "").split(",") if e.strip()]
         if forwarded:

@@ -33,6 +33,20 @@ def test_a_spoofed_first_forwarded_entry_does_not_dodge_the_limit(make_web) -> N
     assert codes[:3] == [401, 401, 401] and set(codes[3:]) == {429}
 
 
+def test_the_edge_workers_client_address_counts_only_with_its_key(make_web) -> None:
+    """Behind the pages.dev edge every request reaches the proxy from a Cloudflare address, so the
+    edge passes the visitor's address in X-Keyhold-Client-IP with a shared key. Without the key
+    the header is ignored, so a client cannot pick its own address."""
+    web = make_web(passcode="open-sesame", unlock_attempts=2, trust_proxy=True, edge_key="edge-secret-123")
+    edge = {"X-Forwarded-For": "104.16.0.1", "X-Keyhold-Edge-Key": "edge-secret-123"}
+    a = [unlock(web, "wrong", **edge, **{"X-Keyhold-Client-IP": "198.51.100.1"}).status_code for _ in range(3)]
+    b = [unlock(web, "wrong", **edge, **{"X-Keyhold-Client-IP": "198.51.100.2"}).status_code for _ in range(2)]
+    assert a == [401, 401, 429] and b == [401, 401]  # two visitors behind one edge address, two limits
+    forged = {"X-Forwarded-For": "203.0.113.9", "X-Keyhold-Edge-Key": "wrong"}
+    c = [unlock(web, "wrong", **forged, **{"X-Keyhold-Client-IP": f"198.51.100.{9 + i}"}).status_code for i in range(3)]
+    assert c == [401, 401, 429]  # a wrong key falls back to the proxy's address, so changing the header does not help
+
+
 def test_changing_the_passcode_locks_browsers_unlocked_with_the_old_one() -> None:
     old = SessionCodec("secret-key-0123456789", passcode="old-pass")
     session = Session.new(1000.0)

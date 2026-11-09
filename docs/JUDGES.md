@@ -9,7 +9,7 @@ money), or in a simulated PayPal in offline mode. No real money moves.
 
 | Item | Value |
 |---|---|
-| Hosted app | `{{HOSTED_URL}}` |
+| Hosted app | `https://keyhold-demo.pages.dev` |
 | Passcode for `/try` | `{{TRY_PASSCODE}}` |
 | PayPal sandbox buyer email | `{{SANDBOX_BUYER_EMAIL}}` |
 | PayPal sandbox buyer password | `{{SANDBOX_BUYER_PASSWORD}}` |
@@ -34,7 +34,7 @@ demo; the real plan is 24 hourly checks)".
 
 ## 1. Capture: the server is fixed, so the hold is charged (T1, $9)
 
-1. Open `{{HOSTED_URL}}/`. It explains the lock on one screen.
+1. Open `https://keyhold-demo.pages.dev/`. It explains the lock on one screen.
 2. Open **Try a rescue** (`/try`), enter the passcode and press **Unlock**.
 3. Press **Break this server** on the **Start here** card, **Typo in sshd_config**.
 4. Every run and status page leads with one sentence and the progress strip Quote, Hold,
@@ -114,14 +114,14 @@ If the model names a priced class instead, a hold is offered; the agent is then 
 
 ## 4. The ledger
 
-- `{{HOSTED_URL}}/judge` lists every rescue first: fault, time, the outcome in words (the raw
+- `https://keyhold-demo.pages.dev/judge` lists every rescue first: fault, time, the outcome in words (the raw
   state is in its tooltip), the amount, the API and webhook ticks, and its invariant checks, with
   the order, authorization, capture and refund ids in a fold per row. Under the table: totals
   held, captured and refunded, a bookkeeping line (invariant problems, money calls in flight),
   the runs that were offered no hold, and a fold with the webhook outcomes (`applied`,
   `duplicate`, `unverified` and others) and the reconciler's last pass.
-- `{{HOSTED_URL}}/judge.json` is the same data as JSON.
-- `{{HOSTED_URL}}/healthz` reports the mode, the world, whether webhooks can be verified, money
+- `https://keyhold-demo.pages.dev/judge.json` is the same data as JSON.
+- `https://keyhold-demo.pages.dev/healthz` reports the mode, the world, whether webhooks can be verified, money
   calls in flight, and unprocessed or unverified webhook deliveries.
 
 ## 5. Optional: check the PayPal sandbox yourself
@@ -198,7 +198,7 @@ Each row names something you can check in the repository or on `/try`.
 
 ## What the browser cannot trigger, and where it is tested
 
-The test suite runs without any account or network (`uv run pytest -q`: 1162 tests, 1159 pass, 3
+The test suite runs without any account or network (`uv run pytest -q`: 1163 tests, 1160 pass, 3
 are skipped because they boot real guests).
 
 | Case | Test |

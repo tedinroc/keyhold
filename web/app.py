@@ -260,7 +260,7 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
         return request.state.session
 
     def ip_of(request: Request) -> str:
-        return client_ip(request, trust_proxy=settings.trust_proxy)
+        return client_ip(request, trust_proxy=settings.trust_proxy, edge_key=settings.edge_key)
 
     agent_name = "The recorded agent" if settings.simulated else "Claude"
     paypal_source = "FakePayPal" if settings.offline else "the PayPal sandbox"

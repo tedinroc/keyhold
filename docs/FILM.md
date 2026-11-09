@@ -1,6 +1,6 @@
 # Keyhold: the film
 
-A 1:58 film for the submission. Everything in the middle of it is real: Keyhold's own pages and
+A 1:58 film for the submission. Its end card gives the live demo, keyhold-demo.pages.dev. Everything in the middle of it is real: Keyhold's own pages and
 console screenshots, recorded from the owner's browser on the hosted Keyhold on 2026-11-08 (UTC),
 with the PayPal sandbox and Claude Haiku 5.5. The opening, the title, the three rules, the
 "under the hood" diagram and the end card are motion graphics.

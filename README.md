@@ -167,7 +167,7 @@ system_reset). `keyhold/console/fake.py` is a scripted console for tests and the
 
 ## Invariants and how they are tested
 
-`uv run pytest -q` collects 1162 tests: 1159 pass and 3 are skipped by default (they boot real
+`uv run pytest -q` collects 1163 tests: 1160 pass and 3 are skipped by default (they boot real
 guests; see "Run it locally"). The tests make no network calls: a fixture refuses any socket
 connection that is not to the loopback address and removes `PAYPAL_*`, `ANTHROPIC_*` and
 `KEYHOLD_*` variables from the environment.
@@ -241,6 +241,14 @@ script, so no model is called. Every page says so. FakePayPal also signs the web
 would send, and they go through the same intake, verification and deduplication as real ones
 about 4 seconds later, so the second tick shows offline too. `/try` needs no passcode in this mode.
 Data goes to `var/`.
+
+### The hosted demo
+
+The hosted demo is served at https://keyhold-demo.pages.dev. A Cloudflare Pages Worker
+(`deploy/edge/_worker.js`) forwards every request to the app behind Caddy and streams the replies,
+live events included. The origin address and a shared key are Pages secrets (`ORIGIN`,
+`EDGE_KEY`). With `KEYHOLD_EDGE_KEY` set to the same key, the app takes the visitor's address from
+the edge, so per-address limits stay per visitor; without the key that header is ignored.
 
 ### PayPal sandbox
 

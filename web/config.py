@@ -36,6 +36,8 @@ KEYHOLD_TRY_RUNS_PER_HOUR          runs one IP address may start per hour (defau
 KEYHOLD_SIM_STOP_PATH_TURN_S       simulated world: seconds the recorded agent pauses before each action on
                                    the Stop path (fstab), so a judge has time to press Stop (default 3; 0: none)
 KEYHOLD_TRUST_PROXY                ``1``: the client address is the last X-Forwarded-For entry
+KEYHOLD_EDGE_KEY                   shared secret of the edge Worker in front of the proxy (``deploy/edge``):
+                                   requests carrying it give the visitor's address in X-Keyhold-Client-IP
 KEYHOLD_VM_HOME                    VM images and runs (default ``var/vm``)
 KEYHOLD_RUNNER_IMAGE               QEMU runner image (default ``keyhold-qemu-runner:3``)
 KEYHOLD_PROBE_STATE_DIR            known_hosts files of the owner probe (default ``var/probe``)
@@ -153,6 +155,7 @@ class Settings:
     unlock_window_s: float = 600.0
     api_calls_per_minute: int = 120
     trust_proxy: bool = False
+    edge_key: str = ""
     background: bool = True  # reconciler, webhook pump and sweeper threads
     sse_poll_s: float = 1.0
     sse_max_s: float = 900.0  # a stream ends after this; EventSource reconnects
@@ -303,6 +306,7 @@ class Settings:
             "judge_buyer_email": env.get("KEYHOLD_JUDGE_BUYER_EMAIL", "").strip(),
             "judge_buyer_password": env.get("KEYHOLD_JUDGE_BUYER_PASSWORD", "").strip(),
             "trust_proxy": _flag(env.get("KEYHOLD_TRUST_PROXY"), False),
+            "edge_key": env.get("KEYHOLD_EDGE_KEY", "").strip(),
             "vm_home": Path(vm_home) if vm_home else None,
             "probe_state_dir": Path(env.get("KEYHOLD_PROBE_STATE_DIR", "").strip() or str(data_dir / "probe")),
             "model": model,

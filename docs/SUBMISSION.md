@@ -1,15 +1,15 @@
 # Keyhold: Devpost submission text (draft)
 
 This is the text for the Devpost form. Everything in it can be checked in this repository, except
-the values in square brackets and capitals ([HOSTED URL], [VIDEO URL], [REPO URL]), which come
-from the deployment, the uploaded film and the public repository. Do not estimate them.
+the values in square brackets and capitals ([VIDEO URL], [REPO URL]), which come from the
+uploaded film and the public repository. Do not estimate them.
 
 | Placeholder | Where it comes from |
 |---|---|
-| [HOSTED URL], [VIDEO URL], [REPO URL] | the deployment, the uploaded film, the public repository |
+| [VIDEO URL], [REPO URL] | the uploaded film, the public repository |
 
 The live-run figures come from [docs/evidence/](evidence/README.md). Test counts below are from
-`uv run pytest -q` on 2026-11-09: 1162 collected, 1159 passed, 3 skipped
+`uv run pytest -q` on 2026-11-09: 1163 collected, 1160 passed, 3 skipped
 (they boot real guests). `tests/test_doc_counts.py` fails while these counts, or the ones in the
 README and the judge guide, differ from the suite's.
 
@@ -114,7 +114,7 @@ keystroke firewall refuses destructive commands before they reach the console.
 
 ## Accomplishments that we're proud of
 
-- 1162 tests: 1159 pass, and 3 boot real guests on demand. None reach the network. A stateful
+- 1163 tests: 1160 pass, and 3 boot real guests on demand. None reach the network. A stateful
   property test drives rescues through random PayPal errors, lost answers, crashes, expiry and
   out-of-order webhooks, checking every money invariant after every step. Chaos tests SIGKILL a
   process around the capture and find exactly one capture afterwards.
@@ -195,7 +195,7 @@ during development.
 
 Full steps: `docs/JUDGES.md`.
 
-- Hosted: [HOSTED URL]. The passcode and a sandbox buyer login are given to the judges
+- Hosted: https://keyhold-demo.pages.dev. The passcode and a sandbox buyer login are given to the judges
   separately. On `/try`, "Typo in sshd_config" ($9) ends in a capture, "fstab lists a disk that is
   gone" ($19) shows Stop voiding the hold, and "GRUB locked by a password" gets no hold. `/judge`
   lists every rescue with PayPal's ids and invariant checks.
