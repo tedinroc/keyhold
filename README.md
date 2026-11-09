@@ -7,7 +7,8 @@ server passes.
 
 **No hold, no keystrokes. Only your server answering can charge you.**
 
-Judges: the testing steps are in [docs/JUDGES.md](docs/JUDGES.md).
+**Watch the 2-minute film:** https://youtu.be/NKffZGEgC5w · **Try it live:** https://keyhold-demo.pages.dev (PayPal sandbox; judges get a one-click
+link in the submission's testing instructions) · Testing steps: [docs/JUDGES.md](docs/JUDGES.md).
 
 ## The PayPal lock, step by step
 

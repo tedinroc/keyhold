@@ -1,12 +1,10 @@
 # Keyhold: Devpost submission text (draft)
 
-This is the text for the Devpost form. Everything in it can be checked in this repository, except
-the values in square brackets and capitals ([VIDEO URL], [REPO URL]), which come from the
-uploaded film and the public repository. Do not estimate them.
+This is the text for the Devpost form. Everything in it can be checked in this repository.
 
-| Placeholder | Where it comes from |
-|---|---|
-| [VIDEO URL], [REPO URL] | the uploaded film, the public repository |
+- Film (1:58): https://youtu.be/NKffZGEgC5w
+- Live demo: https://keyhold-demo.pages.dev
+- Code: https://github.com/tedinroc/keyhold
 
 The live-run figures come from [docs/evidence/](evidence/README.md). Test counts below are from
 `uv run pytest -q` on 2026-11-09: 1163 collected, 1160 passed, 3 skipped
