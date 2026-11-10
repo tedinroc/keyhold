@@ -12,9 +12,9 @@ money), or in a simulated PayPal in offline mode. No real money moves.
 | Item | Value |
 |---|---|
 | Hosted app | `https://keyhold-demo.pages.dev` |
-| Passcode for `/try` | `{{TRY_PASSCODE}}` |
-| PayPal sandbox buyer email | `{{SANDBOX_BUYER_EMAIL}}` |
-| PayPal sandbox buyer password | `{{SANDBOX_BUYER_PASSWORD}}` |
+| One-click judge link (opens `/try` unlocked, no passcode) | in the Devpost testing instructions (judges only) |
+| PayPal sandbox buyer email and password | in the Devpost testing instructions (judges only) |
+| Passcode for `/try` | not needed with the judge link; given to judges on request |
 
 The buyer is a PayPal sandbox personal account with sandbox test money. Use it only in the PayPal
 window that the app opens, and allow pop-ups for the site if the browser asks.
@@ -37,7 +37,8 @@ demo; the real plan is 24 hourly checks)".
 ## 1. Capture: the server is fixed, so the hold is charged (T1, $9)
 
 1. Open `https://keyhold-demo.pages.dev/`. It explains the lock on one screen.
-2. Open **Try a rescue** (`/try`), enter the passcode and press **Unlock**.
+2. Open the one-click judge link from the Devpost testing instructions: it opens **Try a rescue**
+   (`/try`) unlocked. Without it, open `/try`, enter the passcode and press **Unlock**.
 3. Press **Break this server** on the **Start here** card, **Typo in sshd_config**.
 4. Every run and status page leads with one sentence and the progress strip Quote, Hold,
    Keyboard, Probe, then Charged or Voided, with a plate under it that says whether the keyboard
@@ -51,8 +52,8 @@ demo; the real plan is 24 hourly checks)".
      the quote hash, and the owner probe fixed for this rescue (SSH user `probe`, the probe key's
      fingerprint, the page check with its expected text or sha256, and the spec hash that is sent
      as the order's `custom_id`).
-5. Press the PayPal button in **Approve a $9.00 hold**. The sandbox buyer login is right next to
-   it, with Copy buttons. In the PayPal window, log in and approve the payment. You have 15
+5. Press the PayPal button in **Approve a $9.00 hold**. The sandbox buyer email is right next to
+   it, with a Copy button (on the hosted demo the password is in the Devpost testing instructions). In the PayPal window, log in and approve the payment. You have 15
    minutes before an unpaid quote expires.
 6. The page reports the order, then that PayPal holds $9.00, and opens the live status page.
 7. On the status page:
@@ -172,12 +173,13 @@ holding a received delivery's `headers` and `body`; `--webhook-only` skips the h
 
 ## If something gets in the way
 
-- **The test server is in use**: there is one test server at a time. A test VM stays up through
+- **The test servers are in use**: the hosted demo runs two test servers at once (a deployment sets
+  this with `KEYHOLD_TRY_SLOTS`; the default is one). A test VM stays up through
   its warranty, because the warranty re-probes it. `/try` names the run that holds it, links to
   **Watch it live**, says when a warranty or an unpaid quote frees it, and turns the buttons back
   on by itself. When the warranty is your own, it says so, with the check count and the time.
 - **Runs left this hour**: each address may start a few runs per hour (4 unless the deployment
-  sets `KEYHOLD_TRY_RUNS_PER_HOUR`; `/try` shows how many are left). A run cancelled before its
+  sets `KEYHOLD_TRY_RUNS_PER_HOUR`; the hosted demo allows 6; `/try` shows how many are left). A run cancelled before its
   hold counts too. `/try` marks the paths this browser has already done, so the next one is the
   marked card. Once the runs are used, `/try` turns the buttons off, says when the next run is
   allowed, and links to finished runs.

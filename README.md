@@ -390,12 +390,14 @@ Claude is one part of a rescue and has no way to move money.
   `keyhold/agent/firewall.py`.
 - **The probe checks from one place**, the Keyhold host. A server that answers there counts as
   fixed.
-- **Timing.** All times are under CPU emulation (no KVM). With Claude Haiku 5.5 the sshd rescue
-  took 1 minute 48 seconds from hold to capture in the clean run and 2 minutes 28 seconds in the
-  first; that is two runs of one fault, not a benchmark. Judge mode shortens the probe gap and the
+- **Timing.** On a local test VM under CPU emulation (no KVM), the sshd rescue with Claude Haiku
+  5.5 took 1 minute 48 seconds from hold to capture in the clean run and 2 minutes 28 seconds in
+  the first. On the hosted Keyhold (KVM), the five captures came 76 to 105 seconds after the hold.
+  These are a few runs of two faults, not a benchmark. Judge mode shortens the probe gap and the
   warranty, as stated above.
-- **One server at a time on `/try`**, with a passcode, 4 runs per address per hour, and a quote
-  that expires after 15 minutes unpaid.
+- **Few test servers on `/try`**: one by default (`KEYHOLD_TRY_SLOTS`; the hosted demo runs two),
+  unlocked by a passcode or the judge link, 4 runs per address per hour by default (6 on the
+  hosted demo), and a quote that expires after 15 minutes unpaid.
 
 ## Credits
 

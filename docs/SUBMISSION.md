@@ -1,6 +1,6 @@
-# Keyhold: Devpost submission text (draft)
+# Keyhold: Devpost submission text
 
-This is the text for the Devpost form. Everything in it can be checked in this repository.
+The text submitted on Devpost on 2026-11-09. Everything in it can be checked in this repository.
 
 - Film (1:58): https://youtu.be/NKffZGEgC5w
 - Live demo: https://keyhold-demo.pages.dev
@@ -13,23 +13,19 @@ README and the judge guide, differ from the suite's.
 
 ---
 
-**Tagline:** Lend a broken server's console keyboard to an AI agent, with a PayPal authorization
-hold in charge of it.
+**Tagline:** Lend a broken server's console keyboard to an AI agent, with a PayPal authorization hold in charge of it. No hold, no keystrokes; only your server answering can charge you.
 
 ## Inspiration
 
-It is 2 a.m. A solo operator's server has stopped answering SSH. The last way in is the hosting
-provider's web console: a picture of the server's screen and a keyboard. The fix is probably one
-line in a config file.
+I used to look after my own servers, and often that meant heading out in the middle of the night to fix one on site. If your server lives at a hosting provider, its web console saves the trip: a picture of the screen, a keyboard, and behind them, root. But someone still has to be awake to use it.
 
-An AI agent could read that screen and type the fix. Handing it the keyboard is the hard part: the
-console is root on the machine, the operator wants to sleep, and nobody wants to pay for an
-attempt that did not work.
+Often the cause is a configuration change: in [a 2026 survey](https://datacenter.uptimeinstitute.com/rs/711-RIA-145/images/2026.AnnualOutageAnalysis.pdf), 51% of data-center operators who had major IT system or software outages named configuration or change management among their most common causes.
 
-What would make it reasonable to say yes? Money that has not moved yet. A PayPal authorization
-hold can be checked at any moment, the owner can void it, and it becomes a charge only when
-captured. Keyhold ties the keyboard to the hold, and the capture to the owner's own check of the
-server.
+An AI agent could read that screen and type the fix. But hand it root on trust? Pay for a failed attempt? Even shopping gives people pause: in [a 2026 survey PayPal co-released](https://www.commerce.com/en-GB/press/64-of-uk-consumers-want-to-use-agentic-ai-for-shopping-according-to-new-research-from-commerce-and-paypal/), 43% of UK online shoppers were concerned about "AI purchasing a product without the shopper's approval."
+
+What would make yes reasonable? Money that has not moved yet. A PayPal authorization hold can be read anytime, voided anytime, and is no charge until captured. One hold can be the leash on the keyboard and the contract: proof of the fix, then payment.
+
+That is the permission I want for any agent that acts or spends for me: visible, revocable with one press, paid only on proof.
 
 **No hold, no keystrokes. Only your server answering can charge you.**
 
@@ -161,13 +157,13 @@ keystroke firewall refuses destructive commands before they reach the console.
 - Three of our six faults look like a healthy boot, so one screenshot cannot name them. The public
   demo offers the three that show on screen.
 
-## What's next
+## What's next for Keyhold
 
 - A `Console` adapter for a real hosting provider's console API.
 - Keeping the console password from the model, which today sees it in order to type it.
 - Probing from more than one place.
 
-## Honest limits
+**Where it stands today, honestly:**
 
 - Ten live rescues of two faults (eight on the hosted Keyhold): seven captured, three stopped by
   the owner and voided. The other faults have run on real guests, under KVM too, only with a
@@ -179,24 +175,43 @@ keystroke firewall refuses destructive commands before they reach the console.
 
 ## Built with
 
-Python, FastAPI, Uvicorn, Jinja2, SQLite, httpx, Pillow, pytest, Hypothesis, uv,
-paypal-server-sdk, PayPal JS SDK v6, PayPal Orders v2, PayPal Payments v2, PayPal Webhooks,
-Anthropic Python SDK, Claude, QEMU, Debian, Docker, cloud-init, OpenSSH.
+python, fastapi, sqlite, paypal, paypal-server-sdk, paypal-js-sdk-v6, paypal-orders-v2, paypal-payments-v2, paypal-webhooks, claude, claude-haiku-5-5, anthropic, qemu, kvm, debian, pytest, hypothesis, uvicorn, httpx, docker, cloudflare-pages
+
+## How it meets the main technology requirement
+
+PayPal (sandbox). Every money step of the product is a PayPal call:
+- PayPal JS SDK v6: the owner's "Pay with PayPal" button. Our server creates the order, so the browser never sends an amount; the owner approves in PayPal's own window.
+- Orders v2, through the official paypal-server-sdk (2.4.0): create_order with intent AUTHORIZE for the fixed quote ($9, $19 or $29), authorize_order, get_order. The order's custom_id is the sha256 of the owner's own server check.
+- Payments v2: get_authorized_payment is the keyboard lock. A keystroke reaches the console only after Keyhold has read the authorization from PayPal as CREATED, for at least the quote. It reads again every 5 inputs and once its last read is 15 seconds old, and text goes out 8 keys at a time, with a local Stop/void check (no PayPal call) before each batch and before Enter. capture_authorized_payment with final_capture: true runs only after the owner's own SSH login and web page check pass twice; void_payment on Stop, give-up or a time or turn limit; refund_captured_payment if the server falls over again during the warranty.
+- PayPal-Request-Id on every money call (written to an outbox first and replayed by a reconciler); a client token from the OAuth token endpoint for the JS SDK; webhooks for PAYMENT.AUTHORIZATION, PAYMENT.CAPTURE and PAYMENT.REFUND events, verified with verify-webhook-signature (14 of 14 real deliveries verified); PayPal-Mock-Response for negative tests (tools/live_check.py: 22 checks passed against the sandbox).
+
+AI: Claude Haiku 5.5 (claude-haiku-5-5), through the official Anthropic Python SDK (in the recorded runs, reached through an Anthropic-compatible endpoint set with ANTHROPIC_BASE_URL):
+- Free look: Claude reads a screenshot of the broken server's console, names the fault from a fixed list of 14 classes and quotes the screen lines that show it (structured output). Code, not the model, sets the price from the class. A fault the console cannot fix gets no price and no hold. On the hosted demo, 11 free looks: all 9 quotes matched the planted fault, and both looks at the password-locked GRUB menu got no price and no hold.
+- Rescue agent: a tool-use loop with six tools (screenshot, type, key, power_cycle, give_up, finished). Claude reads the console and types the fix; its thinking summaries show on the status page as its notes. None of its tools can move money, and a refusal or API error voids the hold. claude-opus-5-5 is one setting away.
+
+How the two meet: the AI's access to a root console is decided by PayPal's live authorization state, and the money moves only when the owner's own check proves the fix.
 
 ## AI tools used
 
-Claude at runtime through the official `anthropic` SDK (claude-haiku-5-5 in the recorded runs, reached
-through an Anthropic-compatible endpoint set with `ANTHROPIC_BASE_URL`); AI coding assistance (Claude)
-during development.
+- Claude Haiku 5.5 (claude-haiku-5-5), through the official Anthropic Python SDK and an Anthropic-compatible endpoint: the product's runtime AI (the free-look diagnosis and the rescue agent).
+- Claude (Claude Code): AI coding assistance during development: code, tests, reviews, docs, and the scripts that build the demo film.
+- VoxCPM2 (open-source text-to-speech, Apache-2.0): the synthetic narrator voice in the demo film.
+- Whisper large-v3-turbo (mlx-whisper, on device): word timings for the film's edit and captions.
+- macOS Vision OCR (on device): finding the sandbox buyer's e-mail in every film frame so it could be blurred, and a final pass that fails the film if any e-mail address or account name is still readable.
 
 ## Testing instructions (summary)
 
 Full steps: `docs/JUDGES.md`.
 
-- Hosted: https://keyhold-demo.pages.dev. The passcode and a sandbox buyer login are given to the judges
-  separately. On `/try`, "Typo in sshd_config" ($9) ends in a capture, "fstab lists a disk that is
-  gone" ($19) shows Stop voiding the hold, and "GRUB locked by a password" gets no hold. `/judge`
-  lists every rescue with PayPal's ids and invariant checks.
+- Hosted: https://keyhold-demo.pages.dev. The Devpost testing instructions (judges only) give a
+  one-click judge link that unlocks `/try` without the passcode, and the PayPal sandbox buyer
+  login. On `/try`, "Typo in sshd_config" ($9) ends in a capture about 1 to 2 minutes after the
+  hold; on "fstab lists a disk that is gone" ($19), pressing Stop within the first minute after
+  approving voids the hold; "GRUB locked by a password" ends at the free look with no price and
+  no hold. `/judge` lists every rescue with PayPal's ids and invariant checks.
+- The hosted demo runs two test servers at once; after a capture the server stays with its run for
+  about 2 minutes of warranty checks. Each address can start 6 runs per hour there (a cancelled
+  run counts), and an unpaid quote expires after 15 minutes.
 - No accounts: `uv sync`, `uv run python -m web`, then `http://localhost:8000/` (simulated PayPal
   and server, labelled on every page).
 - Tests: `uv run pytest -q`.
