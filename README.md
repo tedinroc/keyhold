@@ -1,14 +1,24 @@
 # Keyhold
 
-Keyhold lends a broken Linux server's web console (its screen and keyboard) to an AI agent, and
-puts a PayPal authorization hold in charge of that keyboard. The agent can type only while PayPal
-shows the hold as live, and the hold turns into a charge only after the owner's own check of the
-server passes.
+**AI server rescue with the keyboard gated by a PayPal sandbox authorization hold.**
+
+Keyhold lends a broken Linux server's console to an AI agent. The agent can type only while the
+hold is live; Keyhold captures it only after the owner's SSH-and-HTTP check passes. Pressing
+**Stop** takes the keyboard back before the hold is voided.
 
 **No hold, no keystrokes. Only your server answering can charge you.**
 
-**Watch the 2-minute film:** https://youtu.be/NKffZGEgC5w · **Try it live:** https://keyhold-demo.pages.dev (PayPal sandbox; judges get a one-click
-link in the submission's testing instructions) · Testing steps: [docs/JUDGES.md](docs/JUDGES.md).
+[Watch the 2-minute film](https://youtu.be/NKffZGEgC5w) · [Explore the sandbox demo](https://keyhold-demo.pages.dev) · [Run offline](#offline-mode-no-accounts-no-network) · [Recorded evidence](docs/evidence/README.md) · [Architecture](#architecture)
+
+**Status:** a working prototype using **PayPal sandbox funds and disposable QEMU guests**. Ten
+recorded rescues with Claude covered two fault types; these are demonstrations, not a recovery
+benchmark. A hosting-provider console adapter is not implemented. See [Honest limits](#honest-limits)
+for what ran and what remains untested.
+
+The hosted rescue flow requires a passcode or the one-click judge link in the submission's testing
+instructions. To explore without accounts or API calls, use [offline mode](#offline-mode-no-accounts-no-network),
+which substitutes FakePayPal, a scripted console and a recorded agent. Judges can follow the
+[screen-by-screen testing guide](docs/JUDGES.md).
 
 ## The PayPal lock, step by step
 
@@ -225,7 +235,9 @@ Needs [uv](https://docs.astral.sh/uv/). The project pins Python 3.13 in `.python
 `uv sync` installs it if it is missing (`pyproject.toml` allows 3.10 or newer; the tests were run
 on 3.13).
 
-```
+```bash
+git clone https://github.com/tedinroc/keyhold.git
+cd keyhold
 uv sync
 uv run pytest -q
 ```
